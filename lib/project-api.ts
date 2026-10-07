@@ -1,4 +1,4 @@
-import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, Sprint, ChecklistItem, GitCommitItem, GitBranchItem, GitPullItem, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowPhase, WorkflowRun, ProjectRepository, CreateProjectRepositoryInput } from "./types";
+import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, Sprint, ChecklistItem, GitCommitItem, GitBranchItem, GitPullItem, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowPhase, WorkflowRun, ProjectRepository, CreateProjectRepositoryInput, PhaseReadiness, KanbanBoard, ImplementationExecution, ImplementationTask } from "./types";
 
 export interface AppNotification {
   id: string;
@@ -50,6 +50,47 @@ function checkStatus(res: Response): Response {
     window.dispatchEvent(new Event("auth:unauthorized"));
   }
   return res;
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly details?: unknown;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: unknown,
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = checkStatus(await fetch(`${BASE_URL}${path}`, {
+    ...init,
+    headers: { ...getHeaders(), ...init?.headers },
+  }));
+  const payload = await res.json().catch(() => null) as { data?: T; message?: string; error?: string; details?: unknown } | null;
+  if (!res.ok) {
+    throw new ApiError(
+      payload?.message || payload?.error || `Request failed with status ${res.status}`,
+      res.status,
+      payload?.error,
+      payload?.details,
+    );
+  }
+  if (!payload || !("data" in payload)) throw new ApiError("Backend returned an invalid response.", res.status);
+  return payload.data as T;
+}
+
+function idempotencyHeaders(): Record<string, string> {
+  return { "Idempotency-Key": crypto.randomUUID() };
 }
 
 // in-progress ↔ in_progress conversion
@@ -724,36 +765,25 @@ export const projectApi = {
     return data;
   },
 
-  async requestPhaseApproval(projectId: string, phase: WorkflowPhase): Promise<ProjectPhaseState> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/phases/${phase}/request-approval`, {
+  async requestPhaseApproval(projectId: string, phase: WorkflowPhase, artifactId: string, expectedHash: string): Promise<ProjectPhaseState> {
+    return apiRequest(`/projects/${projectId}/phases/${phase}/request-approval`, {
       method: "POST",
-      headers: getHeaders(),
+      body: JSON.stringify({ artifactId, expectedHash }),
     });
-    if (!res.ok) throw new Error(`POST request approval failed: ${res.status}`);
-    const { data } = await res.json();
-    return data;
   },
 
-  async approvePhase(projectId: string, phase: WorkflowPhase, comments?: string): Promise<ProjectPhaseState[]> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/phases/${phase}/approve`, {
+  async approvePhase(projectId: string, phase: WorkflowPhase, artifactId: string, expectedHash: string, comments?: string): Promise<ProjectPhaseState[]> {
+    return apiRequest(`/projects/${projectId}/phases/${phase}/approve`, {
       method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify({ comments }),
+      body: JSON.stringify({ artifactId, expectedHash, ...(comments ? { comments } : {}) }),
     });
-    if (!res.ok) throw new Error(`POST approve phase failed: ${res.status}`);
-    const { data } = await res.json();
-    return data;
   },
 
-  async requestPhaseChanges(projectId: string, phase: WorkflowPhase, comments?: string): Promise<ProjectPhaseState> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/phases/${phase}/request-changes`, {
+  async requestPhaseChanges(projectId: string, phase: WorkflowPhase, artifactId: string, expectedHash: string, comments: string): Promise<ProjectPhaseState> {
+    return apiRequest(`/projects/${projectId}/phases/${phase}/request-changes`, {
       method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify({ comments }),
+      body: JSON.stringify({ artifactId, expectedHash, comments }),
     });
-    if (!res.ok) throw new Error(`POST request changes failed: ${res.status}`);
-    const { data } = await res.json();
-    return data;
   },
 
   async getPhaseApprovals(projectId: string, phase?: WorkflowPhase): Promise<PhaseApproval[]> {
@@ -772,31 +802,53 @@ export const projectApi = {
     return data;
   },
 
-  async createPhaseArtifact(projectId: string, data: {
-    phase: WorkflowPhase;
-    type: string;
+  async createRequirementsArtifact(projectId: string, data: {
     title: string;
-    content: string;
+    structuredContent: unknown;
+    baseArtifactId?: string;
+    baseContentHash?: string;
   }): Promise<PhaseArtifact> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/phases/artifacts`, {
+    return apiRequest(`/projects/${projectId}/phases/artifacts`, {
       method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify(data),
+      body: JSON.stringify({ phase: "requirements", ...data }),
     });
-    if (!res.ok) throw new Error(`POST phase artifact failed: ${res.status}`);
-    const { data: artifact } = await res.json();
-    return artifact;
   },
 
-  async runAutomatedPhase(projectId: string, phase: WorkflowPhase, brief?: string): Promise<{ artifact: PhaseArtifact; workflowRun: WorkflowRun }> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/phases/${phase}/run`, {
+  async generateRequirements(projectId: string, brief: string, includeMemory = false): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+    return apiRequest(`/projects/${projectId}/phases/requirements/artifacts/generate`, {
       method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify({ brief }),
+      headers: idempotencyHeaders(),
+      body: JSON.stringify({ brief, includeMemory }),
     });
-    if (!res.ok) throw new Error(`POST run automated phase failed: ${res.status}`);
-    const { data } = await res.json();
-    return data;
+  },
+
+  async generateDocumentation(projectId: string, includeMemory = false): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+    return apiRequest(`/projects/${projectId}/phases/documentation/artifacts/generate`, {
+      method: "POST",
+      headers: idempotencyHeaders(),
+      body: JSON.stringify({ includeMemory }),
+    });
+  },
+
+  async generateArchitecture(projectId: string, includeMemory = false): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+    return apiRequest(`/projects/${projectId}/phases/architecture/artifacts/generate`, {
+      method: "POST",
+      headers: idempotencyHeaders(),
+      body: JSON.stringify({ includeMemory }),
+    });
+  },
+
+  async revisePhaseArtifact(projectId: string, phase: "requirements" | "documentation" | "architecture", artifact: PhaseArtifact, instruction: string): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+    const path = `/projects/${projectId}/phases/${phase}/artifacts/${artifact.id}/${phase === "architecture" ? "revisions/ai" : "revisions"}`;
+    const body = phase === "architecture"
+      ? { operation: "DOCUMENT_REVISION", baseVersion: artifact.version, baseContentHash: artifact.contentHash, instruction, includeMemory: false, rebaseToCurrentAuthorities: false }
+      : { operation: "DOCUMENT_REVISION", instruction, includeMemory: false };
+    return apiRequest(path, { method: "POST", headers: idempotencyHeaders(), body: JSON.stringify(body) });
+  },
+
+  async getPhaseReadiness(projectId: string, phase: "requirements" | "architecture", artifactId: string, expectedHash?: string): Promise<PhaseReadiness> {
+    const query = expectedHash ? `?expectedHash=${encodeURIComponent(expectedHash)}` : "";
+    return apiRequest(`/projects/${projectId}/phases/${phase}/artifacts/${artifactId}/readiness${query}`);
   },
 
   async getWorkflowRuns(projectId: string): Promise<WorkflowRun[]> {
@@ -806,21 +858,35 @@ export const projectApi = {
     return data;
   },
 
-  async getKanbanBoard(projectId: string): Promise<any> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/kanban`, { headers: getHeaders() });
-    if (!res.ok) throw new Error(`GET kanban board failed: ${res.status}`);
-    const { data } = await res.json();
-    return data;
+  async getKanbanBoard(projectId: string): Promise<KanbanBoard> {
+    return apiRequest(`/projects/${projectId}/kanban`);
   },
 
-  async generateKanbanBoard(projectId: string): Promise<any> {
-    const res = await fetch(`${BASE_URL}/projects/${projectId}/kanban/generate`, {
+  async generateKanbanBoard(projectId: string): Promise<KanbanBoard> {
+    return apiRequest(`/projects/${projectId}/kanban/generate`, { method: "POST" });
+  },
+
+  async updateImplementationTask(projectId: string, taskId: string, payload: Partial<Pick<ImplementationTask, "title" | "description" | "acceptanceCriteria" | "targetFiles" | "repositoryId">> & { expectedStateVersion: number }): Promise<ImplementationTask> {
+    return apiRequest(`/projects/${projectId}/kanban/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+
+  async approveImplementationTask(projectId: string, taskId: string, expectedStateVersion: number): Promise<ImplementationTask> {
+    return apiRequest(`/projects/${projectId}/kanban/tasks/${taskId}/approve`, { method: "POST", body: JSON.stringify({ expectedStateVersion }) });
+  },
+
+  async startImplementationExecution(projectId: string, taskId: string): Promise<ImplementationExecution> {
+    return apiRequest(`/projects/${projectId}/kanban/tasks/${taskId}/executions`, { method: "POST", body: JSON.stringify({ idempotencyKey: crypto.randomUUID() }) });
+  },
+
+  async getImplementationExecutions(projectId: string, taskId: string): Promise<ImplementationExecution[]> {
+    return apiRequest(`/projects/${projectId}/kanban/tasks/${taskId}/executions`);
+  },
+
+  async rejectImplementationExecution(projectId: string, taskId: string, executionId: string, comments: string): Promise<ImplementationExecution> {
+    return apiRequest(`/projects/${projectId}/kanban/tasks/${taskId}/executions/${executionId}/reject`, {
       method: "POST",
-      headers: getHeaders(),
+      body: JSON.stringify({ comments }),
     });
-    if (!res.ok) throw new Error(`POST generate kanban failed: ${res.status}`);
-    const { data } = await res.json();
-    return data;
   },
 
   async resolveClarification(projectId: string, clarificationId: string, selectedOption: string, userNotes?: string): Promise<any> {

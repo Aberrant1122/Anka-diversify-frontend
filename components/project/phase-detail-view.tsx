@@ -2,547 +2,161 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { renderToStaticMarkup } from "react-dom/server";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { AlertCircle, CheckCircle2, GitBranch, History, Loader2, Play, Sparkles } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
-import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { CheckCircle2, MessageSquareWarning, FileText, History, Sparkles, Wand2, Coins, Copy, Check, Download, Loader2 } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { projectApi } from "@/lib/project-api";
-import type { WorkflowPhase, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowRun } from "@/lib/types";
+import type { ImplementationExecution, KanbanBoard, PhaseApproval, PhaseArtifact, PhaseReadiness, ProjectPhaseState, ProjectRepository, WorkflowPhase, WorkflowRun } from "@/lib/types";
 
-const PHASE_LABELS: Record<WorkflowPhase, string> = {
-  requirements: "Requirements",
-  documentation: "Documentation",
-  architecture: "Architecture",
-  implementation: "Implementation",
-  testing: "Testing",
-  review: "Review",
+const LABELS: Record<WorkflowPhase, string> = {
+  requirements: "Requirements", documentation: "Documentation", architecture: "Architecture",
+  implementation: "Implementation", testing: "Testing", review: "Review",
 };
 
-interface PhaseDetailViewProps {
-  projectId: string;
-  phase: WorkflowPhase;
-  onStatesChange?: (states: ProjectPhaseState[]) => void;
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : "The request failed. Please try again.";
 }
 
-export function PhaseDetailView({ projectId, phase, onStatesChange }: PhaseDetailViewProps) {
+function readinessMessages(items: PhaseReadiness["errors"]): string[] {
+  return (items ?? []).map((item) => typeof item === "string" ? item : item.message || item.code || item.path || "Validation failed");
+}
+
+interface Props { projectId: string; phase: WorkflowPhase; onStatesChange?: (states: ProjectPhaseState[]) => void }
+
+export function PhaseDetailView({ projectId, phase, onStatesChange }: Props) {
+  if (phase === "implementation") return <ImplementationView projectId={projectId} onStatesChange={onStatesChange} />;
+  if (phase === "testing" || phase === "review") return <LockedPhase phase={phase} />;
+  return <PlanningPhaseView projectId={projectId} phase={phase} onStatesChange={onStatesChange} />;
+}
+
+function PlanningPhaseView({ projectId, phase, onStatesChange }: Props) {
   const [phaseState, setPhaseState] = useState<ProjectPhaseState | null>(null);
   const [artifacts, setArtifacts] = useState<PhaseArtifact[]>([]);
   const [approvals, setApprovals] = useState<PhaseApproval[]>([]);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const [readiness, setReadiness] = useState<PhaseReadiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [lastRunCost, setLastRunCost] = useState<number | null>(null);
-
-  const [draftTitle, setDraftTitle] = useState("");
-  const [draftContent, setDraftContent] = useState("");
-  const [isEditing, setIsEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<"generate" | "revise" | null>(null);
+  const [instruction, setInstruction] = useState("");
   const [comment, setComment] = useState("");
-  const [briefDialogOpen, setBriefDialogOpen] = useState(false);
-  const [brief, setBrief] = useState("");
-  const [copied, setCopied] = useState(false);
-
-  const onStatesChangeRef = useRef(onStatesChange);
-  useEffect(() => {
-    onStatesChangeRef.current = onStatesChange;
-  }, [onStatesChange]);
+  const callbackRef = useRef(onStatesChange);
+  useEffect(() => { callbackRef.current = onStatesChange; }, [onStatesChange]);
 
   const refresh = useCallback(async () => {
-    try {
-      const [states, phaseArtifacts, phaseApprovals, allRuns] = await Promise.all([
-        projectApi.getPhaseStates(projectId),
-        projectApi.getPhaseArtifacts(projectId, phase),
-        projectApi.getPhaseApprovals(projectId, phase),
-        projectApi.getWorkflowRuns(projectId),
-      ]);
-      setPhaseState(states.find((s) => s.phase === phase) || null);
-      setArtifacts(phaseArtifacts);
-      setApprovals(phaseApprovals);
-      setRuns(allRuns.filter((r) => r.currentPhase === phase));
-      onStatesChangeRef.current?.(states);
-    } catch {
-      // silent catch for background revalidation
+    const [states, nextArtifacts, nextApprovals, nextRuns] = await Promise.all([
+      projectApi.getPhaseStates(projectId), projectApi.getPhaseArtifacts(projectId, phase),
+      projectApi.getPhaseApprovals(projectId, phase), projectApi.getWorkflowRuns(projectId),
+    ]);
+    const latest = nextArtifacts[0];
+    let nextReadiness: PhaseReadiness | null = null;
+    if (latest?.contentHash && (phase === "requirements" || phase === "architecture")) {
+      nextReadiness = await projectApi.getPhaseReadiness(projectId, phase, latest.id, latest.contentHash);
     }
-  }, [projectId, phase]);
+    setPhaseState(states.find((state) => state.phase === phase) ?? null);
+    setArtifacts(nextArtifacts); setApprovals(nextApprovals);
+    setRuns(nextRuns.filter((run) => run.currentPhase === phase)); setReadiness(nextReadiness);
+    callbackRef.current?.(states);
+  }, [phase, projectId]);
 
   useEffect(() => {
-    let isMounted = true;
-    if (artifacts.length === 0) {
-      setLoading(true);
-    }
-    refresh().finally(() => {
-      if (isMounted) setLoading(false);
-    });
-    setIsEditing(false);
-    setComment("");
-    return () => { isMounted = false; };
-  }, [projectId, phase, refresh]);
+    let mounted = true;
+    setLoading(true); setError(null);
+    refresh().catch((cause) => mounted && setError(messageOf(cause))).finally(() => mounted && setLoading(false));
+    return () => { mounted = false; };
+  }, [refresh]);
 
-  const latestArtifact = artifacts[0];
-  const status = phaseState?.status || "not_started";
-  const isApproved = status === "approved" || status === "completed";
-
-  const startEditing = () => {
-    setDraftTitle(latestArtifact?.title || `${PHASE_LABELS[phase]} Proposal`);
-    setDraftContent(latestArtifact?.content || "");
-    setIsEditing(true);
+  const mutate = async (operation: () => Promise<unknown>) => {
+    setBusy(true); setError(null);
+    try { await operation(); await refresh(); }
+    catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(false); }
   };
 
-  const handleSaveDraft = async () => {
-    if (!draftContent.trim()) return;
-    setBusy(true);
-    try {
-      if (status === "not_started") {
-        await projectApi.startPhase(projectId, phase);
-      }
-      await projectApi.createPhaseArtifact(projectId, {
-        phase,
-        type: `${phase}_doc`,
-        title: draftTitle.trim() || `${PHASE_LABELS[phase]} Proposal`,
-        content: draftContent,
-      });
-      setIsEditing(false);
-      await refresh();
-    } finally {
-      setBusy(false);
-    }
-  };
+  const latest = artifacts[0];
+  const status = phaseState?.status ?? "not_started";
+  const approved = status === "approved" || status === "completed";
+  const exactHash = latest?.contentHash;
+  const canSubmit = Boolean(latest && exactHash && (phase === "documentation" || readiness?.ready));
 
-  const handleGenerateWithAI = async () => {
-    setBriefDialogOpen(false);
-    setGenerating(true);
-    try {
-      const { workflowRun } = await projectApi.runAutomatedPhase(projectId, phase, brief.trim() || undefined);
-      setLastRunCost(workflowRun.costUSD ?? null);
-      setIsEditing(false);
-      setBrief("");
-      await refresh();
-    } finally {
-      setGenerating(false);
-    }
-  };
+  const generate = () => mutate(async () => {
+    if (phase === "requirements") {
+      if (!instruction.trim()) throw new Error("Describe the product before generating Requirements.");
+      await projectApi.generateRequirements(projectId, instruction.trim());
+    } else if (phase === "documentation") await projectApi.generateDocumentation(projectId);
+    else await projectApi.generateArchitecture(projectId);
+    setInstruction(""); setDialog(null);
+  });
 
-  const handleCopy = () => {
-    if (!latestArtifact) return;
-    navigator.clipboard.writeText(latestArtifact.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+  const revise = () => mutate(async () => {
+    if (!latest || !instruction.trim()) throw new Error("Enter a revision instruction.");
+    await projectApi.revisePhaseArtifact(projectId, phase as "requirements" | "documentation" | "architecture", latest, instruction.trim());
+    setInstruction(""); setDialog(null);
+  });
 
-  const handleDownloadPdf = () => {
-    if (!latestArtifact) return;
-    const bodyHtml = renderToStaticMarkup(<ReactMarkdown>{latestArtifact.content}</ReactMarkdown>);
-    const win = window.open("", "_blank");
-    if (!win) return;
-    win.document.write(`<!doctype html>
-<html>
-  <head>
-    <title>${latestArtifact.title}</title>
-    <meta charset="utf-8" />
-    <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 24px; line-height: 1.6; color: #1a1a1a; }
-      h1, h2, h3 { margin-top: 1.6em; }
-      pre { background: #f4f4f4; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
-      code { background: #f4f4f4; padding: 2px 4px; border-radius: 4px; font-size: 0.9em; }
-      pre code { background: none; padding: 0; }
-    </style>
-  </head>
-  <body>
-    <h1>${latestArtifact.title}</h1>
-    ${bodyHtml}
-  </body>
-</html>`);
-    win.document.close();
-    win.focus();
-    win.print();
-  };
+  if (loading) return <div className="p-4 grid gap-4 lg:grid-cols-3"><Skeleton className="h-72 lg:col-span-2"/><Skeleton className="h-48"/></div>;
 
-  const handleRequestApproval = async () => {
-    setBusy(true);
-    try {
-      await projectApi.requestPhaseApproval(projectId, phase);
-      await refresh();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Reopens an already-approved phase for editing. Nothing about approval is
-  // destructive here — the old approved artifact stays in history, and the
-  // coding agent only picks up whichever version is most recently marked
-  // approved, so this just starts a new round: draft/generate, then
-  // re-approve when ready.
-  const handleRevise = async () => {
-    setBusy(true);
-    try {
-      await projectApi.startPhase(projectId, phase);
-      await refresh();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleApprove = async () => {
-    setBusy(true);
-    try {
-      await projectApi.approvePhase(projectId, phase, comment.trim() || undefined);
-      setComment("");
-      await refresh();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleRequestChanges = async () => {
-    setBusy(true);
-    try {
-      await projectApi.requestPhaseChanges(projectId, phase, comment.trim() || undefined);
-      setComment("");
-      await refresh();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="p-4 grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2 space-y-3">
-          <Skeleton className="h-8 w-1/2" />
-          <Skeleton className="h-40 w-full" />
-        </div>
-        <Skeleton className="h-40 w-full" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="p-4 grid gap-4 lg:grid-cols-3">
-      {/* Main content */}
-      <div className="lg:col-span-2 space-y-4">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div>
-            <h2 className="text-lg font-semibold flex items-center gap-2">
-              {PHASE_LABELS[phase]}
-              {phase === "architecture" && <span className="text-warning" title="Most important human gate">★</span>}
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              {phase === "architecture"
-                ? "System design, components, data flow, tech decisions, and risks — approving this locks context for implementation."
-                : `AI focus and human review for the ${PHASE_LABELS[phase].toLowerCase()} phase.`}
-            </p>
-          </div>
-          <StatusBadge status={status} />
-        </div>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="text-base flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              {latestArtifact ? latestArtifact.title : `${PHASE_LABELS[phase]} Proposal`}
-            </CardTitle>
-            {!isEditing && (
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 cursor-pointer"
-                  onClick={() => setBriefDialogOpen(true)}
-                  disabled={isApproved || generating}
-                >
-                  {generating ? (
-                    <>
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      <span>Generating…</span>
-                    </>
-                  ) : (
-                    <>
-                      <Wand2 className="h-3.5 w-3.5" />
-                      <span>Generate with AI</span>
-                    </>
-                  )}
-                </Button>
-                {isApproved ? (
-                  <Button variant="outline" size="sm" className="cursor-pointer" onClick={handleRevise} disabled={busy}>
-                    Revise Approved Doc
-                  </Button>
-                ) : (
-                  <Button variant="outline" size="sm" className="cursor-pointer" onClick={startEditing} disabled={generating}>
-                    {latestArtifact ? "Edit / New Version" : "Draft Proposal"}
-                  </Button>
-                )}
-                {latestArtifact && (
-                  <>
-                    <Button variant="outline" size="icon" className="h-8 w-8 cursor-pointer" title="Copy to clipboard" onClick={handleCopy}>
-                      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                    </Button>
-                    <Button variant="outline" size="icon" className="h-8 w-8 cursor-pointer" title="Download as PDF" onClick={handleDownloadPdf}>
-                      <Download className="h-3.5 w-3.5" />
-                    </Button>
-                  </>
-                )}
-              </div>
-            )}
-          </CardHeader>
-          <CardContent>
-            {lastRunCost !== null && !isEditing && (
-              <p className="text-xs text-muted-foreground mb-3">
-                Last AI generation cost ≈ ${lastRunCost.toFixed(4)}
-              </p>
-            )}
-            {isEditing ? (
-              <div className="space-y-3">
-                <Input
-                  value={draftTitle}
-                  onChange={(e) => setDraftTitle(e.target.value)}
-                  placeholder="Proposal title"
-                />
-                <Textarea
-                  value={draftContent}
-                  onChange={(e) => setDraftContent(e.target.value)}
-                  placeholder={`Write the ${PHASE_LABELS[phase].toLowerCase()} proposal in markdown — system overview, components, data flow, tech decisions, risks, diagrams (Mermaid supported as code fences).`}
-                  rows={14}
-                  className="font-mono text-sm"
-                />
-                <div className="flex justify-end gap-2">
-                  <Button variant="outline" size="sm" className="cursor-pointer" onClick={() => setIsEditing(false)} disabled={busy}>
-                    Cancel
-                  </Button>
-                  <Button size="sm" onClick={handleSaveDraft} disabled={busy || !draftContent.trim()} className="gap-2 cursor-pointer">
-                    {busy ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        <span>Saving...</span>
-                      </>
-                    ) : (
-                      "Save"
-                    )}
-                  </Button>
-                </div>
-              </div>
-            ) : latestArtifact ? (
-              <div className="prose prose-sm dark:prose-invert max-w-none min-w-0 wrap-break-word [&_pre]:overflow-x-auto [&_pre]:whitespace-pre-wrap [&_code]:wrap-break-word">
-                <ReactMarkdown>{latestArtifact.content}</ReactMarkdown>
-              </div>
-            ) : (
-              <div className="text-center py-10 text-muted-foreground">
-                <Sparkles className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">No {PHASE_LABELS[phase].toLowerCase()} proposal yet.</p>
-                <p className="text-xs mt-1">Generate one with AI, or draft it yourself, to move this phase forward.</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Approval actions */}
-        {latestArtifact && !isEditing && !isApproved && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Review</CardTitle>
-              <CardDescription>
-                {status === "awaiting_approval"
-                  ? "Waiting for approval — add a comment and approve, or send it back for changes."
-                  : "Request approval once the proposal is ready for review."}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {status === "awaiting_approval" ? (
-                <>
-                  <Textarea
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                    placeholder="Optional comment"
-                    rows={3}
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      className="gap-2 bg-success text-success-foreground hover:bg-success/90 cursor-pointer"
-                      onClick={handleApprove}
-                      disabled={busy}
-                    >
-                      {busy ? (
-                        <>
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          <span>Approving...</span>
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="h-4 w-4" />
-                          <span>Approve {PHASE_LABELS[phase]}</span>
-                        </>
-                      )}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      className="gap-2 border-warning text-warning hover:bg-warning/10 cursor-pointer"
-                      onClick={handleRequestChanges}
-                      disabled={busy}
-                    >
-                      {busy ? (
-                        <>
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          <span>Requesting...</span>
-                        </>
-                      ) : (
-                        <>
-                          <MessageSquareWarning className="h-4 w-4" />
-                          <span>Request Changes</span>
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </>
-              ) : (
-                <Button onClick={handleRequestApproval} disabled={busy} className="gap-2 cursor-pointer">
-                  {busy ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      <span>Submitting...</span>
-                    </>
-                  ) : (
-                    "Submit for Approval"
-                  )}
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
-      {/* Side panel */}
-      <div className="space-y-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <History className="h-4 w-4" />
-              Decision Log
-            </CardTitle>
-            <CardDescription>Approval history for this phase</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {approvals.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No decisions recorded yet.</p>
-            ) : (
-              approvals.map((a) => (
-                <div key={a.id} className="text-sm border-l-2 pl-3 py-0.5" style={{ borderColor: a.decision === "approved" ? "var(--success)" : "var(--warning)" }}>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className={a.decision === "approved" ? "text-success border-success" : "text-warning border-warning"}>
-                      {a.decision.replace("_", " ")}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground">
-                      {new Date(a.approvedAt).toLocaleDateString()}
-                    </span>
-                  </div>
-                  {a.comments && <p className="text-muted-foreground mt-1">{a.comments}</p>}
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-
-        {artifacts.length > 1 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Previous Versions</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {artifacts.slice(1).map((a) => (
-                <div key={a.id} className="text-sm flex items-center justify-between">
-                  <span className="truncate">{a.title}</span>
-                  <span className="text-xs text-muted-foreground shrink-0 ml-2">v{a.version}</span>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        )}
-
-        {runs.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Coins className="h-4 w-4" />
-                Automation Runs
-              </CardTitle>
-              <CardDescription>
-                Total: ${runs.reduce((sum, r) => sum + (r.costUSD || 0), 0).toFixed(4)}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {runs.map((r) => (
-                <div key={r.id} className="text-sm flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Badge
-                      variant="outline"
-                      className={
-                        r.status === "completed" ? "text-success border-success"
-                          : r.status === "failed" ? "text-destructive border-destructive"
-                            : "text-muted-foreground"
-                      }
-                    >
-                      {r.status}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground truncate">
-                      {r.modelUsage?.model || "—"}
-                    </span>
-                  </div>
-                  <span className="text-xs text-muted-foreground shrink-0">
-                    {r.costUSD != null ? `$${r.costUSD.toFixed(4)}` : "—"}
-                  </span>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        )}
-
-        <Separator />
-        <p className="text-xs text-muted-foreground">
-          Draft proposals manually, or generate them with AI — both feed the same approval flow.
-        </p>
-      </div>
-
-      <Dialog open={briefDialogOpen} onOpenChange={setBriefDialogOpen}>
-        <DialogContent className="sm:max-w-125">
-          <DialogHeader>
-            <DialogTitle>Generate {PHASE_LABELS[phase]} with AI</DialogTitle>
-            <DialogDescription>
-              Optional — add any specifics you want reflected (target users, constraints, tech preferences, scope).
-              Without one, it drafts from the project name/description alone.
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            value={brief}
-            onChange={(e) => setBrief(e.target.value)}
-            placeholder="e.g. This is a scientific calculator for engineering students — needs trig functions and a history log. Should be a Next.js + TypeScript app."
-            rows={5}
-          />
-          <DialogFooter>
-            <Button variant="outline" className="cursor-pointer" onClick={handleGenerateWithAI} disabled={generating}>
-              Skip — generate from project info only
-            </Button>
-            <Button className="cursor-pointer" onClick={handleGenerateWithAI} disabled={generating}>
-              Generate
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+  return <div className="p-4 grid gap-4 lg:grid-cols-3">
+    <div className="lg:col-span-2 space-y-4">
+      <div className="flex items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">{LABELS[phase]}</h2><p className="text-sm text-muted-foreground">Authoritative backend artifact workflow</p></div><StatusBadge status={status}/></div>
+      {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4"/><AlertTitle>Action failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+      <Card><CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-base">{latest?.title ?? `${LABELS[phase]} artifact`}</CardTitle><CardDescription>{latest ? `Version ${latest.version} · ${latest.lifecycleStatus ?? "DRAFT"}` : "No artifact has been generated."}</CardDescription></div><Button onClick={() => { setInstruction(""); setDialog("generate"); }} disabled={busy || approved}><Sparkles className="h-4 w-4"/>Generate</Button></div></CardHeader>
+        <CardContent>{latest ? <ArtifactContent artifact={latest}/> : <p className="py-12 text-center text-sm text-muted-foreground">Generate the first {LABELS[phase].toLowerCase()} artifact to continue.</p>}</CardContent></Card>
+      {latest && !approved && <Card><CardHeader><CardTitle className="text-base">Review and approval</CardTitle><CardDescription>All decisions are bound to artifact {latest.id} and its server content hash.</CardDescription></CardHeader><CardContent className="space-y-3">
+        {readiness && <Readiness readiness={readiness}/>}
+        {phase === "documentation" && <p className="text-sm text-muted-foreground">Documentation eligibility is validated by the dedicated approval endpoint.</p>}
+        <Textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Required when requesting changes; optional for approval" rows={3}/>
+        <div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => { setInstruction(""); setDialog("revise"); }} disabled={busy}>Revise with AI</Button>
+          {status === "awaiting_approval" ? <><Button disabled={busy || !exactHash} onClick={() => mutate(() => projectApi.approvePhase(projectId, phase, latest.id, exactHash!, comment.trim() || undefined))}><CheckCircle2 className="h-4 w-4"/>Approve</Button><Button variant="destructive" disabled={busy || !exactHash || !comment.trim()} onClick={() => mutate(() => projectApi.requestPhaseChanges(projectId, phase, latest.id, exactHash!, comment.trim()))}>Request changes</Button></> : <Button disabled={busy || !canSubmit} onClick={() => mutate(() => projectApi.requestPhaseApproval(projectId, phase, latest.id, exactHash!))}>Submit for approval</Button>}
+        </div></CardContent></Card>}
     </div>
-  );
+    <div className="space-y-4"><Card><CardHeader><CardTitle className="text-base flex items-center gap-2"><History className="h-4 w-4"/>Version history</CardTitle></CardHeader><CardContent className="space-y-2">{artifacts.length ? artifacts.map((artifact) => <div key={artifact.id} className="flex justify-between text-sm"><span className="truncate">{artifact.title}</span><Badge variant="outline">v{artifact.version}</Badge></div>) : <p className="text-sm text-muted-foreground">No versions yet.</p>}</CardContent></Card>
+      <Card><CardHeader><CardTitle className="text-base">Decision log</CardTitle></CardHeader><CardContent className="space-y-2">{approvals.length ? approvals.map((approval) => <div key={approval.id} className="text-sm"><Badge variant="outline">{approval.decision.replaceAll("_", " ")}</Badge>{approval.comments && <p className="mt-1 text-muted-foreground">{approval.comments}</p>}</div>) : <p className="text-sm text-muted-foreground">No decisions yet.</p>}</CardContent></Card>
+      {runs.length > 0 && <Card><CardHeader><CardTitle className="text-base">Generation runs</CardTitle></CardHeader><CardContent>{runs.slice(0, 5).map((run) => <div key={run.id} className="flex justify-between text-sm py-1"><span>{run.triggerType}</span><Badge variant="outline">{run.status}</Badge></div>)}</CardContent></Card>}
+    </div>
+    <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}><DialogContent><DialogHeader><DialogTitle>{dialog === "revise" ? `Revise ${LABELS[phase]}` : `Generate ${LABELS[phase]}`}</DialogTitle><DialogDescription>{dialog === "revise" ? "Describe the exact changes required. A new server version will be created." : phase === "requirements" ? "Describe the product goal, users, constraints, and scope." : "The backend will generate from the approved upstream artifact."}</DialogDescription></DialogHeader>{(dialog === "revise" || phase === "requirements") && <Textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={6}/>}<DialogFooter><Button variant="outline" onClick={() => setDialog(null)}>Cancel</Button><Button onClick={dialog === "revise" ? revise : generate} disabled={busy || ((dialog === "revise" || phase === "requirements") && !instruction.trim())}>{busy && <Loader2 className="h-4 w-4 animate-spin"/>}Continue</Button></DialogFooter></DialogContent></Dialog>
+  </div>;
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { label: string; className: string }> = {
-    not_started: { label: "Not Started", className: "text-muted-foreground border-muted-foreground/30 bg-secondary/30" },
-    in_progress: { label: "In Progress", className: "text-primary border-primary/40 bg-primary/10" },
-    awaiting_approval: { label: "Awaiting Approval", className: "text-amber-400 border-amber-500/40 bg-amber-500/10" },
-    approved: { label: "Approved", className: "text-emerald-400 border-emerald-500/40 bg-emerald-500/10" },
-    completed: { label: "Completed", className: "text-emerald-400 border-emerald-500/40 bg-emerald-500/10" },
-  };
-  const s = map[status] || map.not_started;
-  return <Badge variant="outline" className={s.className}>{s.label}</Badge>;
+function ArtifactContent({ artifact }: { artifact: PhaseArtifact }) {
+  if (artifact.structuredContent !== undefined && artifact.structuredContent !== null) return <pre className="max-h-144 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-4 text-xs">{JSON.stringify(artifact.structuredContent, null, 2)}</pre>;
+  return <div className="prose prose-sm dark:prose-invert max-w-none"><ReactMarkdown>{artifact.content}</ReactMarkdown></div>;
 }
+
+function Readiness({ readiness }: { readiness: PhaseReadiness }) {
+  const errors = readinessMessages(readiness.errors);
+  return <Alert variant={readiness.ready ? "default" : "destructive"}>{readiness.ready ? <CheckCircle2 className="h-4 w-4"/> : <AlertCircle className="h-4 w-4"/>}<AlertTitle>{readiness.ready ? "Ready for approval" : "Not ready for approval"}</AlertTitle><AlertDescription>{errors.length ? <ul className="list-disc pl-4">{errors.map((item) => <li key={item}>{item}</li>)}</ul> : "Server validation passed."}</AlertDescription></Alert>;
+}
+
+function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectId" | "onStatesChange">) {
+  const [board, setBoard] = useState<KanbanBoard | null>(null); const [repos, setRepos] = useState<ProjectRepository[]>([]);
+  const [executions, setExecutions] = useState<Record<string, ImplementationExecution[]>>({}); const [busyId, setBusyId] = useState<string | null>(null);
+  const [reviewComments, setReviewComments] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null);
+  const callbackRef = useRef(onStatesChange); useEffect(() => { callbackRef.current = onStatesChange; }, [onStatesChange]);
+  const refresh = useCallback(async () => { const [nextBoard, nextRepos, states] = await Promise.all([projectApi.getKanbanBoard(projectId), projectApi.getRepositories(projectId), projectApi.getPhaseStates(projectId)]); setBoard(nextBoard); setRepos(nextRepos); callbackRef.current?.(states); }, [projectId]);
+  useEffect(() => { refresh().catch((cause) => setError(messageOf(cause))).finally(() => setLoading(false)); }, [refresh]);
+  const act = async (id: string, operation: () => Promise<unknown>) => { setBusyId(id); setError(null); try { await operation(); await refresh(); } catch (cause) { setError(messageOf(cause)); } finally { setBusyId(null); } };
+  const tasks = board?.stages.flatMap((stage) => stage.tasks) ?? [];
+  if (loading) return <div className="p-4"><Skeleton className="h-72"/></div>;
+  return <div className="p-4 space-y-4"><div className="flex items-center justify-between"><div><h2 className="text-lg font-semibold">Implementation planning</h2><p className="text-sm text-muted-foreground">Architecture-derived tasks controlled by backend state and versions</p></div><Button disabled={busyId !== null} onClick={() => act("generate", () => projectApi.generateKanbanBoard(projectId))}><GitBranch className="h-4 w-4"/>Generate tasks</Button></div>
+    {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4"/><AlertTitle>Action failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+    {tasks.length === 0 ? <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">Approve Architecture, then generate implementation tasks.</CardContent></Card> : <div className="grid gap-4 lg:grid-cols-2">{tasks.map((task) => <Card key={task.id}><CardHeader><div className="flex justify-between gap-2"><div><CardTitle className="text-base">{task.title}</CardTitle><CardDescription>{task.description}</CardDescription></div><Badge variant="outline">{task.implementationState ?? task.status}</Badge></div></CardHeader><CardContent className="space-y-3">
+      <div><p className="text-xs font-medium">Acceptance criteria</p><ul className="list-disc pl-5 text-sm text-muted-foreground">{task.acceptanceCriteria.map((item) => <li key={item}>{item}</li>)}</ul></div>
+      <Select value={task.repositoryId ?? undefined} disabled={!['draft','changes_requested','failed'].includes(task.implementationState ?? '') || busyId === task.id} onValueChange={(repositoryId) => act(task.id, () => projectApi.updateImplementationTask(projectId, task.id, { expectedStateVersion: task.stateVersion, repositoryId }))}><SelectTrigger><SelectValue placeholder="Select repository before approval"/></SelectTrigger><SelectContent>{repos.map((repo) => <SelectItem key={repo.id} value={repo.id}>{repo.name} · {repo.role}</SelectItem>)}</SelectContent></Select>
+      <div className="flex flex-wrap gap-2">{task.implementationState === "draft" && <Button disabled={busyId === task.id || !task.repositoryId} onClick={() => act(task.id, () => projectApi.approveImplementationTask(projectId, task.id, task.stateVersion))}>Approve task v{task.stateVersion}</Button>}{task.implementationState === "approved" && <Button disabled={busyId === task.id} onClick={() => act(task.id, () => projectApi.startImplementationExecution(projectId, task.id))}><Play className="h-4 w-4"/>Start execution</Button>}<Button variant="outline" disabled={busyId === task.id} onClick={() => act(task.id, async () => { const next = await projectApi.getImplementationExecutions(projectId, task.id); setExecutions((current) => ({ ...current, [task.id]: next })); })}>Refresh executions</Button></div>
+      {(executions[task.id] ?? []).map((execution) => <div key={execution.id} className="rounded-md border p-3 text-sm"><div className="flex justify-between"><span>Execution {execution.id.slice(0, 8)}</span><Badge variant="outline">{execution.state}</Badge></div>{execution.diffSummary && <p className="mt-2 text-muted-foreground">{execution.diffSummary}</p>}{execution.changedFiles && <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">{execution.changedFiles.map((file) => <li key={file}>{file}</li>)}</ul>}{execution.validationEvidence && <pre className="mt-2 overflow-auto text-xs">{JSON.stringify(execution.validationEvidence, null, 2)}</pre>}{execution.state === "awaiting_review" && <div className="mt-3 space-y-2"><Textarea value={reviewComments[execution.id] ?? ""} onChange={(event) => setReviewComments((current) => ({ ...current, [execution.id]: event.target.value }))} placeholder="Required change-request comments" rows={3}/><Button variant="destructive" disabled={busyId === execution.id || !(reviewComments[execution.id] ?? "").trim()} onClick={() => act(execution.id, async () => { await projectApi.rejectImplementationExecution(projectId, task.id, execution.id, reviewComments[execution.id].trim()); const next = await projectApi.getImplementationExecutions(projectId, task.id); setExecutions((current) => ({ ...current, [task.id]: next })); })}>Request execution changes</Button><p className="text-xs text-muted-foreground">Owner acceptance is unavailable until the backend exposes the exact generated file contents required by its acceptance contract.</p></div>}</div>)}
+    </CardContent></Card>)}</div>}
+  </div>;
+}
+
+function LockedPhase({ phase }: { phase: WorkflowPhase }) { return <div className="p-4"><Card><CardHeader><CardTitle>{LABELS[phase]}</CardTitle><CardDescription>This phase is not exposed by the verified backend workflow yet.</CardDescription></CardHeader></Card></div>; }
+
+function StatusBadge({ status }: { status: string }) { return <Badge variant="outline">{status.replaceAll("_", " ")}</Badge>; }

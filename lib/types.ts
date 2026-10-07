@@ -285,6 +285,11 @@ export interface ProjectPhaseState {
   approvedById?: string;
   approvedAt?: string;
   notes?: string;
+  currentArtifactId?: string | null;
+  approvalCandidateArtifactId?: string | null;
+  currentApprovedArtifactId?: string | null;
+  activeRunId?: string | null;
+  stateVersion: number;
 }
 
 export interface PhaseArtifact {
@@ -294,7 +299,13 @@ export interface PhaseArtifact {
   type: string;
   title: string;
   content: string;
+  structuredContent?: unknown;
+  schemaVersion?: number;
+  contentHash?: string | null;
   version: number;
+  previousVersionId?: string | null;
+  basedOnArtifactId?: string | null;
+  lifecycleStatus?: "DRAFT" | "AWAITING_APPROVAL" | "APPROVED" | "SUPERSEDED";
   createdBy: string;
   createdAt: string;
   approved: boolean;
@@ -304,10 +315,67 @@ export interface PhaseApproval {
   id: string;
   projectId: string;
   phase: WorkflowPhase;
+  artifactId?: string | null;
+  artifactVersion?: number | null;
+  artifactContentHash?: string | null;
   approvedById: string;
   approvedAt: string;
   decision: "approved" | "changes_requested" | "rejected";
   comments?: string;
+}
+
+export interface PhaseReadiness {
+  ready: boolean;
+  artifactId: string;
+  contentHash: string;
+  errors?: Array<string | { code?: string; message?: string; path?: string }>;
+  warnings?: Array<string | { code?: string; message?: string; path?: string }>;
+  [key: string]: unknown;
+}
+
+export interface KanbanTaskDependency {
+  taskId: string;
+  dependencyTaskId: string;
+}
+
+export interface ImplementationExecution {
+  id: string;
+  taskId: string;
+  state: string;
+  changedFiles?: string[];
+  diffSummary?: string | null;
+  validationEvidence?: Record<string, unknown> | null;
+  failureDiagnostic?: string | null;
+  startedAt: string;
+  completedAt?: string | null;
+}
+
+export interface ImplementationTask {
+  id: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  targetFiles: string[];
+  status: string;
+  implementationEligible: boolean;
+  implementationState?: string | null;
+  stateVersion: number;
+  repositoryId?: string | null;
+  architectureComponentIds: string[];
+  dependencies: KanbanTaskDependency[];
+}
+
+export interface KanbanStage {
+  id: string;
+  title: string;
+  order: number;
+  tasks: ImplementationTask[];
+}
+
+export interface KanbanBoard {
+  id: string;
+  projectId: string;
+  stages: KanbanStage[];
 }
 
 export interface WorkflowRun {
