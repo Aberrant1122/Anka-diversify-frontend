@@ -45,9 +45,11 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { projectApi } from "@/lib/project-api";
-import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, WorkflowPhase, ProjectPhaseState } from "@/lib/types";
+import type { Project, Task, ProjectFile, Activity, Comment, ProjectMember, WorkflowPhase, ProjectPhaseState } from "@/lib/types";
 import { inviteApi } from "@/lib/invite-api";
 import type { TeamUser } from "@/lib/invite-api";
+import { ProjectFileItem } from "@/components/project/project-file-item";
+import { ProjectBrief } from "@/components/project/project-brief";
 import { cn } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -175,6 +177,7 @@ export default function ProjectDetailPage({
   const [newFile, setNewFile] = useState({ name: "", type: "doc", phase: "development", url: "" });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileUploading, setFileUploading] = useState(false);
+  const [fileUploadError, setFileUploadError] = useState<string | null>(null);
   const [fileToDelete, setFileToDelete] = useState<ProjectFile | null>(null);
 
   useEffect(() => {
@@ -182,6 +185,7 @@ export default function ProjectDetailPage({
   }, [id]);
 
   const handleAddFile = async () => {
+    setFileUploadError(null);
     const name = selectedFile ? selectedFile.name : newFile.name.trim();
     if (!name) return;
 
@@ -208,7 +212,12 @@ export default function ProjectDetailPage({
       }
       setFiles((prev) => prev.map((f) => f.id === optimistic.id ? saved : f));
     } catch {
-      setFiles((prev) => prev.filter((f) => f.id !== optimistic.id));
+      setFileUploadError("Upload could not be confirmed. Check the file status and try again if needed.");
+      try {
+        setFiles(await projectApi.getFiles(id));
+      } catch {
+        setFiles((prev) => prev.filter((f) => f.id !== optimistic.id));
+      }
     } finally {
       setFileUploading(false);
       setNewFile({ name: "", type: "doc", phase: "development", url: "" });
@@ -269,13 +278,12 @@ export default function ProjectDetailPage({
 
   // ── activities state ──
   const [activities, setActivities] = useState<Activity[]>([]);
-  // Always starts as "kanban" so the client's first render matches the server's
-  // (sessionStorage doesn't exist during SSR) — the saved tab is restored right
-  // after mount instead, avoiding a hydration mismatch on whichever tab was last active.
-  const [activeTab, setActiveTab] = useState("kanban");
+  // Project Brief is canonical. The query parameter provides reload-safe deep links.
+  const [activeTab, setActiveTab] = useState("project-brief");
   useEffect(() => {
-    const saved = sessionStorage.getItem(`project-tab-${id}`);
-    if (saved) setActiveTab(saved);
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    const allowed = new Set(["project-brief", "kanban", "workflow", "files", "repositories", "code", "activity", "ai-assistant"]);
+    if (requested && allowed.has(requested)) setActiveTab(requested);
   }, [id]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -399,48 +407,6 @@ export default function ProjectDetailPage({
 
   // ── delete task confirmation ──
   const [taskToDelete, setTaskToDelete] = useState<Task | null>(null);
-
-  // ── chat state ──
-  const [chatMessages, setChatMessages] = useState<ProjectChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatSending, setChatSending] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  const chatPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const refreshChat = useCallback(() => {
-    projectApi.getChatMessages(id).then((msgs) => {
-      setChatMessages(msgs);
-    }).catch(() => { });
-  }, [id]);
-
-  useEffect(() => {
-    if (activeTab === "chat") {
-      refreshChat();
-      chatPollRef.current = setInterval(refreshChat, 5000);
-    } else {
-      if (chatPollRef.current) clearInterval(chatPollRef.current);
-    }
-    return () => { if (chatPollRef.current) clearInterval(chatPollRef.current); };
-  }, [activeTab, refreshChat]);
-
-  // Auto-scroll to bottom when chat messages change
-  useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
-  }, [chatMessages]);
-
-  const handleSendChat = async () => {
-    if (!chatInput.trim() || chatSending) return;
-    const content = chatInput.trim();
-    setChatInput("");
-    setChatSending(true);
-    try {
-      const msg = await projectApi.sendChatMessage(id, content);
-      setChatMessages((prev) => [...prev, msg]);
-    } catch { setChatInput(content); }
-    finally { setChatSending(false); }
-  };
 
   // ── edit project dialog ──
   const [isEditOpen, setIsEditOpen] = useState(false);
@@ -733,16 +699,16 @@ export default function ProjectDetailPage({
           </div>
 
           {/* ── Tabs ── */}
-          <Tabs value={activeTab} className="w-full" onValueChange={(v) => { setActiveTab(v); sessionStorage.setItem(`project-tab-${id}`, v); if (v === "activity") refreshActivities(); if (v === "workflow") refreshPhaseStates(); }}>
+          <Tabs value={activeTab} className="w-full" onValueChange={(v) => { setActiveTab(v); router.replace(`/development/projects/${id}?tab=${encodeURIComponent(v)}`, { scroll: false }); if (v === "activity") refreshActivities(); if (v === "workflow") refreshPhaseStates(); }}>
             <div className="px-4 border-t bg-card/30 backdrop-blur-md overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
               <TabsList className="h-12 bg-transparent gap-1.5 sm:gap-2 w-max sm:w-full justify-start py-1">
                 {[
+                  { id: "project-brief", label: "Project Brief", icon: FileText },
                   { id: "kanban", label: "Kanban Board", icon: Kanban },
                   { id: "workflow", label: "Workflow", icon: Layers },
                   { id: "files", label: "Files", icon: FolderOpen },
                   { id: "repositories", label: "Repositories", icon: GitBranch },
                   { id: "code", label: "Code", icon: Code },
-                  { id: "chat", label: "Chat", icon: MessageSquare },
                   { id: "activity", label: "Activity", icon: ActivityIcon },
                   { id: "ai-assistant", label: "AI Agent", icon: Zap, badge: "Multi-Stage" },
                 ].map(({ id: tabId, label, icon: Icon, badge }) => (
@@ -763,6 +729,10 @@ export default function ProjectDetailPage({
               </TabsList>
             </div>
 
+            <TabsContent value="project-brief" className="mt-0 flex-1">
+              <ProjectBrief project={project} files={files} onUpload={() => setIsAddFileOpen(true)} />
+            </TabsContent>
+
             {/* ── Workflow ── forceMount keeps workflow state & artifacts loaded without tab blink */}
             <TabsContent
               value="workflow"
@@ -771,7 +741,17 @@ export default function ProjectDetailPage({
               style={activeTab !== "workflow" ? { display: "none" } : undefined}
             >
               <PhaseStepper states={phaseStates} activePhase={workflowPhase} onSelectPhase={setWorkflowPhase} />
-              <PhaseDetailView projectId={id} phase={workflowPhase} onStatesChange={setPhaseStates} />
+              <PhaseDetailView
+                projectId={id}
+                phase={workflowPhase}
+                project={project}
+                activeTab={activeTab}
+                onStatesChange={setPhaseStates}
+                onNavigateTab={(tab) => {
+                  setActiveTab(tab);
+                  router.replace(`/development/projects/${id}?tab=${encodeURIComponent(tab)}`, { scroll: false });
+                }}
+              />
             </TabsContent>
 
             {/* ── Kanban ── */}
@@ -998,6 +978,7 @@ export default function ProjectDetailPage({
                     Add File
                   </Button>
                 </div>
+                {fileUploadError && <p role="alert" className="text-sm text-rose-700 mb-3">{fileUploadError}</p>}
                 {files.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                     <File className="h-12 w-12 mb-4 opacity-30" />
@@ -1014,47 +995,14 @@ export default function ProjectDetailPage({
                           <span className="text-sm text-muted-foreground">Phase Deliverables</span>
                         </div>
                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                          {phaseFiles.map((file) => {
-                            const Icon = file.type === "image" ? Image
-                              : file.type === "code" ? FileText
-                                : File;
-                            return (
-                              <Card key={file.id} className="group hover:border-primary/50 transition-all relative">
-                                <CardContent className="p-4">
-                                  <button
-                                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
-                                    onClick={() => setFileToDelete(file)}
-                                  >
-                                    <X className="h-3.5 w-3.5" />
-                                  </button>
-                                  <div className="aspect-video bg-muted rounded-lg flex items-center justify-center mb-3">
-                                    {file.url ? (
-                                      <button
-                                        onClick={async () => {
-                                          try {
-                                            const url = await projectApi.getFileDownloadUrl(file.projectId || project.id, file.id);
-                                            window.open(url, "_blank");
-                                          } catch {
-                                            try { window.open(file.url, "_blank"); } catch {}
-                                          }
-                                        }}
-                                        className="flex items-center justify-center w-full h-full cursor-pointer"
-                                      >
-                                        <Icon className="h-8 w-8 text-muted-foreground" />
-                                      </button>
-                                    ) : (
-                                      <Icon className="h-8 w-8 text-muted-foreground" />
-                                    )}
-                                  </div>
-                                  <p className="font-medium text-sm truncate">{file.name}</p>
-                                  <p className="text-xs text-muted-foreground mt-1">
-                                    {new Date(file.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                                    {file.size && ` · ${file.size}`}
-                                  </p>
-                                </CardContent>
-                              </Card>
-                            );
-                          })}
+                          {phaseFiles.map((file) => (
+                            <ProjectFileItem
+                              key={file.id}
+                              file={file}
+                              projectId={id}
+                              onDeleteClick={setFileToDelete}
+                            />
+                          ))}
                           <Card
                             className="border-dashed hover:border-primary/50 transition-all cursor-pointer"
                             onClick={() => { setNewFile((f) => ({ ...f, phase })); setIsAddFileOpen(true); }}
@@ -1075,58 +1023,6 @@ export default function ProjectDetailPage({
             {/* ── Repositories ── */}
             <TabsContent value="repositories" className="mt-0 flex-1 p-4 sm:p-6 focus-visible:outline-none">
               <ProjectRepositories projectId={id} project={project} />
-            </TabsContent>
-
-            {/* ── Chat ── */}
-            <TabsContent value="chat" className="mt-0 flex-1 min-h-0 flex flex-col">
-              <div className="flex flex-col h-full overflow-hidden gap-4 p-4">
-                <div className="flex-1 min-h-0 overflow-y-auto space-y-4">
-                  {chatMessages.length === 0 ? (
-                    <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-                      <MessageSquare className="h-12 w-12 mb-4 opacity-20" />
-                      No messages yet. Start the conversation!
-                    </div>
-                  ) : (
-                    chatMessages.map((msg) => {
-                      const currentUser = typeof window !== "undefined"
-                        ? (() => { try { return JSON.parse(localStorage.getItem("user") || "{}"); } catch { return {}; } })()
-                        : {};
-                      const isMe = msg.userId === currentUser?.id;
-                      return (
-                        <div key={msg.id} className={`flex items-start gap-3 ${isMe ? "flex-row-reverse" : ""}`}>
-                          <Avatar className="h-8 w-8 shrink-0 mt-1">
-                            <AvatarFallback className="text-xs bg-primary/10 text-primary">{msg.userName.slice(0, 2).toUpperCase()}</AvatarFallback>
-                          </Avatar>
-                          <div className={`max-w-[80%] flex flex-col ${isMe ? "items-end" : "items-start"}`}>
-                            {!isMe && <p className="text-xs font-medium text-foreground mb-1">{msg.userName}</p>}
-                            <div className={`rounded-3xl px-4 py-3 text-sm shadow-sm break-words ${isMe ? "bg-primary text-primary-foreground" : "bg-secondary/60 border border-border/50 text-foreground"}`}>
-                              {msg.content}
-                            </div>
-                            <p className="text-xs text-muted-foreground mt-1.5">
-                              {new Date(msg.createdAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
-                            </p>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                  <div ref={chatEndRef} />
-                </div>
-                <div className="border-t pt-4">
-                  <div className="flex items-center gap-2">
-                    <Input
-                      placeholder="Type a message..."
-                      className="flex-1"
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendChat(); } }}
-                    />
-                    <Button size="icon" className="h-9 w-9 shrink-0" onClick={handleSendChat} disabled={chatSending || !chatInput.trim()}>
-                      <Send className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
             </TabsContent>
 
             {/* ── Activity ── */}

@@ -1,4 +1,4 @@
-import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, Sprint, ChecklistItem, GitCommitItem, GitBranchItem, GitPullItem, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowPhase, WorkflowRun, ProjectRepository, CreateProjectRepositoryInput, PhaseReadiness, KanbanBoard, ImplementationExecution, ImplementationTask } from "./types";
+import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, Sprint, ChecklistItem, GitCommitItem, GitBranchItem, GitPullItem, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowPhase, WorkflowRun, ProjectRepository, CreateProjectRepositoryInput, PhaseReadiness, KanbanBoard, ImplementationExecution, ImplementationTask, DocumentExtractionSummary, EvidencePageResponse, LiveBriefWorkspace, LiveBriefRevision, LiveBriefConfirmation, ArtifactCurrentnessInfo, ArtifactDiffSummary } from "./types";
 
 export interface AppNotification {
   id: string;
@@ -93,7 +93,7 @@ function idempotencyHeaders(): Record<string, string> {
   return { "Idempotency-Key": crypto.randomUUID() };
 }
 
-// in-progress ↔ in_progress conversion
+// in-progress â†” in_progress conversion
 function toFrontendStatus(s: string): Task["status"] {
   if (s === "in_progress") return "in-progress";
   return s as Task["status"];
@@ -121,10 +121,11 @@ function mapTask(t: any, projectId: string): Task {
   };
 }
 
-// Map backend project row → frontend Project shape
+// Map backend project row â†’ frontend Project shape
 function mapProject(p: any): Project {
   return {
     id: p.id,
+    ownerId: p.userId,
     name: p.name,
     description: p.description || "",
     phase: p.phase || "product-modeling",
@@ -279,7 +280,7 @@ export const projectApi = {
     if (!res.ok) throw new Error(`DELETE /projects/${id} failed: ${res.status}`);
   },
 
-  // ── Tasks ──────────────────────────────────────────────────────────────────
+  // â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getTasks(projectId: string): Promise<Task[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/tasks`, { headers: getHeaders() });
@@ -387,7 +388,7 @@ export const projectApi = {
     };
   },
 
-  // ── Files ──────────────────────────────────────────────────────────────────
+  // â”€â”€ Files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getFiles(projectId: string): Promise<ProjectFile[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/files`, { headers: getHeaders() });
@@ -396,17 +397,18 @@ export const projectApi = {
     return data as ProjectFile[];
   },
 
-  async uploadFile(projectId: string, file: File, opts: { phase?: string } = {}): Promise<ProjectFile> {
+  async uploadFile(projectId: string, file: File, opts: { phase?: string } | string = {}): Promise<ProjectFile> {
+    const options = typeof opts === 'string' ? { phase: opts } : (opts || {});
     // Step 1: get presigned S3 URL
     const presignRes = await fetch(`${BASE_URL}/projects/${projectId}/files/presign`, {
       method: "POST",
       headers: getHeaders(),
-      body: JSON.stringify({ filename: file.name, mimetype: file.type, phase: opts.phase }),
+      body: JSON.stringify({ filename: file.name, mimetype: file.type, phase: options.phase }),
     });
     if (!presignRes.ok) throw new Error(`Presign failed: ${presignRes.status}`);
     const { data: { uploadUrl, fileUrl, key, type } } = await presignRes.json();
 
-    // Step 2: upload directly to S3 (no auth headers — presigned URL handles it)
+    // Step 2: upload directly to S3 (no auth headers â€” presigned URL handles it)
     const s3Res = await fetch(uploadUrl, {
       method: "PUT",
       headers: { "Content-Type": file.type },
@@ -421,7 +423,7 @@ export const projectApi = {
       body: JSON.stringify({
         name: file.name,
         type,
-        phase: opts.phase || "development",
+        phase: options.phase || "development",
         url: fileUrl,
         s3Key: key,
         size: file.size < 1024 ? `${file.size} B`
@@ -468,7 +470,43 @@ export const projectApi = {
     return data.downloadUrl;
   },
 
-  // ── Members ────────────────────────────────────────────────────────────────
+  async getFileExtraction(projectId: string, fileId: string): Promise<DocumentExtractionSummary> {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/files/${fileId}/extraction`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error(`GET file extraction failed: ${res.status}`);
+    const { data } = await res.json();
+    return data as DocumentExtractionSummary;
+  },
+
+  async getFileEvidence(
+    projectId: string,
+    fileId: string,
+    pagination: { page?: number; limit?: number } = {}
+  ): Promise<EvidencePageResponse> {
+    const params = new URLSearchParams();
+    if (pagination.page) params.append("page", pagination.page.toString());
+    if (pagination.limit) params.append("limit", pagination.limit.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/files/${fileId}/evidence${query}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error(`GET file evidence failed: ${res.status}`);
+    const { data } = await res.json();
+    return data as EvidencePageResponse;
+  },
+
+  async retryFileExtraction(projectId: string, fileId: string): Promise<DocumentExtractionSummary> {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/files/${fileId}/extraction/retry`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error(`POST retry extraction failed: ${res.status}`);
+    const { data } = await res.json();
+    return data as DocumentExtractionSummary;
+  },
+
+  // â”€â”€ Members â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getMembers(projectId: string): Promise<ProjectMember[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/members`, { headers: getHeaders() });
@@ -497,7 +535,7 @@ export const projectApi = {
     if (!res.ok) throw new Error("Failed to remove member");
   },
 
-  // ── Chat ───────────────────────────────────────────────────────────────────
+  // â”€â”€ Chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getChatMessages(projectId: string): Promise<ProjectChatMessage[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/chat`, { headers: getHeaders() });
@@ -517,7 +555,7 @@ export const projectApi = {
     return data as ProjectChatMessage;
   },
 
-  // ── Activities ─────────────────────────────────────────────────────────────
+  // â”€â”€ Activities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getActivities(projectId: string): Promise<Activity[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/activities`, { headers: getHeaders() });
@@ -526,7 +564,7 @@ export const projectApi = {
     return data as Activity[];
   },
 
-  // ── Comments ───────────────────────────────────────────────────────────────
+  // â”€â”€ Comments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getComments(projectId: string, taskId: string): Promise<Comment[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/tasks/${taskId}/comments`, { headers: getHeaders() });
@@ -554,7 +592,7 @@ export const projectApi = {
     if (!res.ok) throw new Error(`DELETE comment failed: ${res.status}`);
   },
 
-  // ── Sprints ────────────────────────────────────────────────────────────────
+  // â”€â”€ Sprints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getSprints(projectId: string): Promise<Sprint[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/sprints`, { headers: getHeaders() });
@@ -623,7 +661,7 @@ export const projectApi = {
     if (!res.ok) throw new Error(`DELETE sprint task failed: ${res.status}`);
   },
 
-  // ── Task Dependencies ───────────────────────────────────────────────────────
+  // â”€â”€ Task Dependencies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async addDependency(projectId: string, blockedTaskId: string, blockingTaskId: string): Promise<void> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/tasks/${blockedTaskId}/dependencies`, {
@@ -642,7 +680,7 @@ export const projectApi = {
     if (!res.ok) throw new Error(`Remove dependency failed: ${res.status}`);
   },
 
-  // ── Notifications ───────────────────────────────────────────────────────────
+  // â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getNotifications(): Promise<AppNotification[]> {
     const res = await fetch(`${BASE_URL}/notifications`, { headers: getHeaders() });
@@ -671,7 +709,7 @@ export const projectApi = {
     await fetch(`${BASE_URL}/notifications/${id}`, { method: "DELETE", headers: getHeaders() });
   },
 
-  // ── Checklist ───────────────────────────────────────────────────────────────
+  // â”€â”€ Checklist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async getChecklist(projectId: string, taskId: string): Promise<ChecklistItem[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/tasks/${taskId}/checklist`, { headers: getHeaders() });
     const json = await res.json();
@@ -700,7 +738,7 @@ export const projectApi = {
     });
   },
 
-  // ── Project Documents (AI-generated) ─────────────────────────────────────
+  // â”€â”€ Project Documents (AI-generated) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async createDocument(projectId: string, payload: { title: string; content: string; type: string }): Promise<{ id: string; title: string; projectId: string }> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/documents`, {
@@ -713,7 +751,7 @@ export const projectApi = {
     return data;
   },
 
-  // ── Global Documents ───────────────────────────────────────────────────────
+  // â”€â”€ Global Documents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getAllDocuments(): Promise<(ProjectFile & { projectName: string })[]> {
     const res = await fetch(`${BASE_URL}/projects/documents/all`, { headers: getHeaders() });
@@ -722,7 +760,7 @@ export const projectApi = {
     return data;
   },
 
-  // ── Git (live GitHub API) ─────────────────────────────────────────────────
+  // â”€â”€ Git (live GitHub API) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getGitCommits(projectId: string, branch?: string): Promise<GitCommitItem[]> {
     const params = branch && branch !== "all" ? `?branch=${encodeURIComponent(branch)}` : "";
@@ -746,7 +784,7 @@ export const projectApi = {
     return data;
   },
 
-  // ── Phased workflow ────────────────────────────────────────────────────────
+  // â”€â”€ Phased workflow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async getPhaseStates(projectId: string): Promise<ProjectPhaseState[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/phases`, { headers: getHeaders() });
@@ -814,12 +852,46 @@ export const projectApi = {
     });
   },
 
-  async generateRequirements(projectId: string, brief: string, includeMemory = false): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+  async generateRequirements(projectId: string, briefConfirmationId: string, includeMemory = false): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
     return apiRequest(`/projects/${projectId}/phases/requirements/artifacts/generate`, {
       method: "POST",
       headers: idempotencyHeaders(),
-      body: JSON.stringify({ brief, includeMemory }),
+      body: JSON.stringify({ briefConfirmationId, includeMemory }),
     });
+  },
+
+  async getLiveBrief(projectId: string): Promise<LiveBriefWorkspace> {
+    return apiRequest(`/projects/${projectId}/brief`);
+  },
+
+  async initializeLiveBrief(projectId: string): Promise<LiveBriefWorkspace> {
+    return apiRequest(`/projects/${projectId}/brief/initialize`, { method: "POST" });
+  },
+
+  async sendIntakeMessage(projectId: string, message: string, sourceIds: string[]): Promise<unknown> {
+    return apiRequest(`/projects/${projectId}/brief/chat`, {
+      method: "POST", headers: idempotencyHeaders(), body: JSON.stringify({ message, sourceIds }),
+    });
+  },
+
+  async updateLiveBrief(projectId: string, input: { expectedRevisionNumber: number; title: string; markdownContent: string; changeSummary?: string }): Promise<{ revision: LiveBriefRevision }> {
+    return apiRequest(`/projects/${projectId}/brief/revision`, { method: "PUT", body: JSON.stringify(input) });
+  },
+
+  async decideLiveBriefClaim(projectId: string, claimId: string, input: { action: "ACCEPT" | "REJECT" | "CORRECT" | "SUPERSEDE"; expectedRevisionNumber: number; title?: string; content?: string }): Promise<{ revision: LiveBriefRevision }> {
+    return apiRequest(`/projects/${projectId}/brief/claims/${claimId}/decision`, { method: "POST", body: JSON.stringify(input) });
+  },
+
+  async answerLiveBriefQuestion(projectId: string, questionId: string, answer: string, expectedRevisionNumber: number): Promise<{ revision: LiveBriefRevision }> {
+    return apiRequest(`/projects/${projectId}/brief/questions/${questionId}/answer`, { method: "POST", body: JSON.stringify({ answer, expectedRevisionNumber }) });
+  },
+
+  async resolveLiveBriefContradiction(projectId: string, contradictionId: string, resolutionNote: string, expectedRevisionNumber: number, dismiss = false): Promise<{ revision: LiveBriefRevision }> {
+    return apiRequest(`/projects/${projectId}/brief/contradictions/${contradictionId}/resolve`, { method: "POST", body: JSON.stringify({ resolutionNote, expectedRevisionNumber, dismiss }) });
+  },
+
+  async confirmLiveBrief(projectId: string, revisionId: string, expectedContentHash: string): Promise<LiveBriefConfirmation> {
+    return apiRequest(`/projects/${projectId}/brief/confirm`, { method: "POST", body: JSON.stringify({ revisionId, expectedContentHash }) });
   },
 
   async generateDocumentation(projectId: string, includeMemory = false): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
@@ -846,9 +918,48 @@ export const projectApi = {
     return apiRequest(path, { method: "POST", headers: idempotencyHeaders(), body: JSON.stringify(body) });
   },
 
+  async rebaseDocumentation(projectId: string, artifact: PhaseArtifact, instruction = "Rebase documentation to current approved requirements"): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+    const path = `/projects/${projectId}/phases/documentation/artifacts/${artifact.id}/revisions`;
+    const body = {
+      operation: "DOCUMENT_REVISION",
+      instruction,
+      includeMemory: false,
+      rebaseToCurrentRequirements: true,
+    };
+    return apiRequest(path, { method: "POST", headers: idempotencyHeaders(), body: JSON.stringify(body) });
+  },
+
+  async rebaseArchitecture(projectId: string, artifact: PhaseArtifact, instruction = "Rebase architecture to current approved authorities"): Promise<{ artifact: PhaseArtifact | null; run: WorkflowRun; readiness: PhaseReadiness | null }> {
+    const path = `/projects/${projectId}/phases/architecture/artifacts/${artifact.id}/revisions/ai`;
+    const body = {
+      operation: "DOCUMENT_REVISION",
+      baseVersion: artifact.version,
+      baseContentHash: artifact.contentHash,
+      instruction,
+      includeMemory: false,
+      rebaseToCurrentAuthorities: true,
+    };
+    return apiRequest(path, { method: "POST", headers: idempotencyHeaders(), body: JSON.stringify(body) });
+  },
+
   async getPhaseReadiness(projectId: string, phase: "requirements" | "architecture", artifactId: string, expectedHash?: string): Promise<PhaseReadiness> {
     const query = expectedHash ? `?expectedHash=${encodeURIComponent(expectedHash)}` : "";
     return apiRequest(`/projects/${projectId}/phases/${phase}/artifacts/${artifactId}/readiness${query}`);
+  },
+
+  async getArtifactCurrentness(projectId: string, artifactId: string, phase?: string): Promise<ArtifactCurrentnessInfo> {
+    const path = phase
+      ? `/projects/${projectId}/phases/${phase}/artifacts/${artifactId}/currentness`
+      : `/projects/${projectId}/phases/artifacts/${artifactId}/currentness`;
+    return apiRequest(path);
+  },
+
+  async getArtifactDiff(projectId: string, artifactId: string, compareArtifactId: string, phase?: string): Promise<ArtifactDiffSummary> {
+    const query = `?compareArtifactId=${encodeURIComponent(compareArtifactId)}`;
+    const path = phase
+      ? `/projects/${projectId}/phases/${phase}/artifacts/${artifactId}/diff${query}`
+      : `/projects/${projectId}/phases/artifacts/${artifactId}/diff${query}`;
+    return apiRequest(path);
   },
 
   async getWorkflowRuns(projectId: string): Promise<WorkflowRun[]> {
@@ -856,6 +967,10 @@ export const projectApi = {
     if (!res.ok) throw new Error(`GET workflow runs failed: ${res.status}`);
     const { data } = await res.json();
     return data;
+  },
+
+  async getWorkflowRun(projectId: string, runId: string): Promise<WorkflowRun> {
+    return apiRequest(`/projects/${projectId}/phases/runs/${runId}`);
   },
 
   async getKanbanBoard(projectId: string): Promise<KanbanBoard> {
@@ -900,7 +1015,7 @@ export const projectApi = {
     return data;
   },
 
-  // ── Multi-Repository Support ──────────────────────────────────────────
+  // â”€â”€ Multi-Repository Support â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async getRepositories(projectId: string): Promise<ProjectRepository[]> {
     const res = await fetch(`${BASE_URL}/projects/${projectId}/repositories`, { headers: getHeaders() });
     if (!res.ok) throw new Error(`GET /projects/${projectId}/repositories failed: ${res.status}`);

@@ -2,6 +2,7 @@
 
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { Toaster } from "@/components/ui/toaster";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 
@@ -25,6 +26,7 @@ export function Providers({ children }: { children: ReactNode }) {
     <ThemeProvider defaultTheme="light">
       <AuthProvider>
         <AuthGuard>{children}</AuthGuard>
+        <Toaster />
       </AuthProvider>
     </ThemeProvider>
   );

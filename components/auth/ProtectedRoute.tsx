@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 
@@ -14,6 +14,12 @@ export default function ProtectedRoute({ children, requiredRole, fallback }: Pro
   const { isAuthenticated, isLoading, user } = useAuth();
   const router = useRouter();
 
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated && !fallback) {
+      router.push('/');
+    }
+  }, [isLoading, isAuthenticated, fallback, router]);
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -26,13 +32,7 @@ export default function ProtectedRoute({ children, requiredRole, fallback }: Pro
   }
 
   if (!isAuthenticated) {
-    if (fallback) {
-      return <>{fallback}</>;
-    }
-    
-    // Redirect to login
-    router.push('/');
-    return null;
+    return fallback ? <>{fallback}</> : null;
   }
 
   // Check role requirements
