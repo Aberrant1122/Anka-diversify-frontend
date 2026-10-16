@@ -86,7 +86,7 @@ interface Props {
 }
 
 export function PhaseDetailView({ projectId, phase, project, activeTab, onStatesChange, onNavigateTab }: Props) {
-  if (phase === "implementation") return <ImplementationView projectId={projectId} onStatesChange={onStatesChange} />;
+  if (phase === "implementation") return <ImplementationView projectId={projectId} project={project} onStatesChange={onStatesChange} />;
   if (phase === "testing" || phase === "review") return <LockedPhase phase={phase} />;
   return (
     <PlanningPhaseView
@@ -1023,14 +1023,30 @@ function Readiness({ readiness }: { readiness: PhaseReadiness }) {
   );
 }
 
-function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectId" | "onStatesChange">) {
+function ImplementationView({ projectId, project, onStatesChange }: Pick<Props, "projectId" | "project" | "onStatesChange">) {
   const [board, setBoard] = useState<KanbanBoard | null>(null);
   const [repos, setRepos] = useState<ProjectRepository[]>([]);
+  const [phaseStates, setPhaseStates] = useState<ProjectPhaseState[]>([]);
   const [executions, setExecutions] = useState<Record<string, ImplementationExecution[]>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reviewComments, setReviewComments] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const currentUser = typeof window !== "undefined"
+    ? (() => {
+        try {
+          return JSON.parse(localStorage.getItem("user") || "null");
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+  const projectOwnerId = project?.userId || project?.ownerId;
+  const currentUserId = currentUser?.id;
+  const isOwner = Boolean(projectOwnerId && currentUserId && projectOwnerId === currentUserId);
+
   const callbackRef = useRef(onStatesChange);
   useEffect(() => {
     callbackRef.current = onStatesChange;
@@ -1044,6 +1060,7 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
     ]);
     setBoard(nextBoard);
     setRepos(nextRepos);
+    setPhaseStates(states);
     callbackRef.current?.(states);
   }, [projectId]);
 
@@ -1053,18 +1070,32 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
       .finally(() => setLoading(false));
   }, [refresh]);
 
-  const act = async (id: string, operation: () => Promise<unknown>) => {
+  const act = async (id: string, operation: () => Promise<unknown>, successMsg?: string) => {
     setBusyId(id);
     setError(null);
+    setSuccessMessage(null);
     try {
       await operation();
       await refresh();
+      if (successMsg) setSuccessMessage(successMsg);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
       setBusyId(null);
     }
   };
+
+  const archState = phaseStates.find((s) => s.phase === "architecture");
+  const isArchApproved = Boolean(
+    archState &&
+    (archState.status === "approved" || archState.status === "completed") &&
+    archState.currentApprovedArtifactId
+  );
+  const isArchStale = Boolean(archState?.isStale);
+  const archBlocked = !isArchApproved || isArchStale;
+  const archBlockedReason = isArchStale
+    ? (archState?.staleReason || "Architecture is stale due to upstream requirements or documentation revisions. Re-approve Architecture first.")
+    : "Architecture is not approved. Architecture must be approved by the project owner before generating implementation tasks.";
 
   const tasks = board?.stages.flatMap((stage) => stage.tasks) ?? [];
 
@@ -1078,16 +1109,42 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
 
   return (
     <div className="p-4 space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Implementation planning</h2>
           <p className="text-sm text-muted-foreground">Architecture-derived tasks controlled by backend state and versions</p>
         </div>
-        <Button disabled={busyId !== null} onClick={() => act("generate", () => projectApi.generateKanbanBoard(projectId))}>
-          <GitBranch className="h-4 w-4 mr-1.5" />
-          Generate tasks
-        </Button>
+        <div className="flex items-center gap-2">
+          {!isOwner && (
+            <span className="text-xs text-muted-foreground">Only the project owner can generate tasks</span>
+          )}
+          <Button
+            disabled={busyId !== null || archBlocked || !isOwner}
+            onClick={() =>
+              act(
+                "generate",
+                () => projectApi.generateKanbanBoard(projectId, crypto.randomUUID()),
+                "Implementation task proposals generated successfully from approved Architecture."
+              )
+            }
+          >
+            {busyId === "generate" ? (
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            ) : (
+              <GitBranch className="h-4 w-4 mr-1.5" />
+            )}
+            Generate tasks
+          </Button>
+        </div>
       </div>
+
+      {archBlocked && (
+        <Alert variant="destructive" data-testid="architecture-blocked-alert">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Architecture Prerequisite Required</AlertTitle>
+          <AlertDescription>{archBlockedReason}</AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">
@@ -1097,37 +1154,87 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
         </Alert>
       )}
 
+      {successMessage && (
+        <Alert className="border-green-600 bg-green-50 text-green-900 dark:bg-green-950 dark:text-green-100">
+          <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+          <AlertTitle>Success</AlertTitle>
+          <AlertDescription>{successMessage}</AlertDescription>
+        </Alert>
+      )}
+
       {tasks.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Approve Architecture, then generate implementation tasks.
+            {archBlocked
+              ? "Approve Architecture first to unblock task generation."
+              : "Architecture is approved. Click \"Generate tasks\" above to decompose it into Kanban implementation tasks."}
           </CardContent>
         </Card>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {tasks.map((task) => (
-            <Card key={task.id}>
+            <Card key={task.id} className="flex flex-col justify-between">
               <CardHeader>
-                <div className="flex justify-between gap-2">
+                <div className="flex justify-between items-start gap-2">
                   <div>
                     <CardTitle className="text-base">{task.title}</CardTitle>
-                    <CardDescription>{task.description}</CardDescription>
+                    <CardDescription className="mt-1">{task.description}</CardDescription>
                   </div>
                   <Badge variant="outline">{task.implementationState ?? task.status}</Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
+                {task.architectureComponentIds && task.architectureComponentIds.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">Architecture Components</p>
+                    <div className="flex flex-wrap gap-1">
+                      {task.architectureComponentIds.map((cid) => (
+                        <Badge key={cid} variant="secondary" className="font-mono text-xs">
+                          {cid}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {task.targetFiles && task.targetFiles.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">Target Files</p>
+                    <div className="flex flex-wrap gap-1">
+                      {task.targetFiles.map((file) => (
+                        <code key={file} className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">
+                          {file}
+                        </code>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {task.dependencies && task.dependencies.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">Prerequisites</p>
+                    <div className="flex flex-wrap gap-1">
+                      {task.dependencies.map((dep) => (
+                        <Badge key={dep.taskId + dep.dependencyTaskId} variant="outline" className="text-xs">
+                          {dep.dependencyTask?.title || dep.dependencyTaskId} ({dep.dependencyTask?.implementationState ?? "prerequisite"})
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div>
                   <p className="text-xs font-medium">Acceptance criteria</p>
-                  <ul className="list-disc pl-5 text-sm text-muted-foreground">
+                  <ul className="list-disc pl-5 text-sm text-muted-foreground mt-1">
                     {task.acceptanceCriteria.map((item) => (
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
                 </div>
+
                 <Select
                   value={task.repositoryId ?? undefined}
-                  disabled={!["draft", "changes_requested", "failed"].includes(task.implementationState ?? "") || busyId === task.id}
+                  disabled={!["draft", "changes_requested", "failed"].includes(task.implementationState ?? "") || busyId === task.id || !isOwner}
                   onValueChange={(repositoryId) =>
                     act(task.id, () =>
                       projectApi.updateImplementationTask(projectId, task.id, {
@@ -1148,22 +1255,36 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
                     ))}
                   </SelectContent>
                 </Select>
-                <div className="flex flex-wrap gap-2">
+
+                <div className="flex flex-wrap gap-2 pt-2">
                   {task.implementationState === "draft" && (
-                    <Button
-                      disabled={busyId === task.id || !task.repositoryId}
-                      onClick={() =>
-                        act(task.id, () =>
-                          projectApi.approveImplementationTask(projectId, task.id, task.stateVersion)
-                        )
-                      }
-                    >
-                      Approve task v{task.stateVersion}
-                    </Button>
+                    <>
+                      {isOwner ? (
+                        <Button
+                          disabled={busyId === task.id || !task.repositoryId}
+                          onClick={() =>
+                            act(
+                              task.id,
+                              () => projectApi.approveImplementationTask(projectId, task.id, task.stateVersion),
+                              `Task "${task.title}" approved successfully.`
+                            )
+                          }
+                        >
+                          Approve task v{task.stateVersion}
+                        </Button>
+                      ) : (
+                        <Button disabled title="Only the project owner can approve tasks">
+                          Approve task (Owner only)
+                        </Button>
+                      )}
+                      {!isOwner && (
+                        <p className="text-xs text-muted-foreground">Only the project owner can approve artifacts</p>
+                      )}
+                    </>
                   )}
                   {task.implementationState === "approved" && (
                     <Button
-                      disabled={busyId === task.id}
+                      disabled={busyId === task.id || !isOwner}
                       onClick={() => act(task.id, () => projectApi.startImplementationExecution(projectId, task.id))}
                     >
                       <Play className="h-4 w-4 mr-1.5" />
@@ -1183,6 +1304,7 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
                     Refresh executions
                   </Button>
                 </div>
+
                 {(executions[task.id] ?? []).map((execution) => (
                   <div key={execution.id} className="rounded-md border p-3 text-sm">
                     <div className="flex justify-between">
@@ -1218,19 +1340,17 @@ function ImplementationView({ projectId, onStatesChange }: Pick<Props, "projectI
                           variant="destructive"
                           disabled={busyId === execution.id || !(reviewComments[execution.id] ?? "").trim()}
                           onClick={() =>
-                            act(execution.id, async () => {
-                              await projectApi.rejectImplementationExecution(
+                            act(task.id, () =>
+                              projectApi.rejectImplementationExecution(
                                 projectId,
                                 task.id,
                                 execution.id,
-                                reviewComments[execution.id].trim()
-                              );
-                              const next = await projectApi.getImplementationExecutions(projectId, task.id);
-                              setExecutions((current) => ({ ...current, [task.id]: next }));
-                            })
+                                reviewComments[execution.id] ?? ""
+                              )
+                            )
                           }
                         >
-                          Request execution changes
+                          Request changes
                         </Button>
                       </div>
                     )}

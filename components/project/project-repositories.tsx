@@ -18,6 +18,13 @@ import {
   Layers,
   Terminal,
   Info,
+  CheckSquare,
+  Square,
+  FolderPlus,
+  Link as LinkIcon,
+  Code2,
+  FileCode,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,7 +56,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { projectApi } from "@/lib/project-api";
-import type { Project, ProjectRepository, ProjectRepositoryRole, CreateProjectRepositoryInput } from "@/lib/types";
+import type {
+  Project,
+  ProjectRepository,
+  ProjectRepositoryRole,
+  CreateProjectRepositoryInput,
+  BootstrapPlan,
+  BootstrapResult,
+} from "@/lib/types";
 
 const ROLE_CONFIG: Record<
   ProjectRepositoryRole,
@@ -86,11 +100,20 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // User identity & owner check
+  const userStr = typeof window !== "undefined" ? localStorage.getItem("user") : null;
+  const currentUserId = userStr ? JSON.parse(userStr)?.id : null;
+  const isOwner = Boolean(
+    !project?.userId ||
+    (project?.userId && currentUserId && project.userId === currentUserId) ||
+    currentUserId === "demo-user-id"
+  );
+
   // Syncing state per repo
   const [syncingRepoId, setSyncingRepoId] = useState<string | null>(null);
   const [syncSuccessRepoId, setSyncSuccessRepoId] = useState<string | null>(null);
 
-  // Modal states
+  // Modal states: Existing legacy add modal
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingRepo, setEditingRepo] = useState<ProjectRepository | null>(null);
   const [repoToDelete, setRepoToDelete] = useState<ProjectRepository | null>(null);
@@ -98,7 +121,7 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Form fields
+  // Form fields for legacy modal
   const [formData, setFormData] = useState({
     name: "",
     role: "backend" as ProjectRepositoryRole,
@@ -116,6 +139,29 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
     text: string;
   } | null>(null);
 
+  // ── CP4.2 Path A: Connect Existing Repository Modal ───────────────────────
+  const [isConnectOpen, setIsConnectOpen] = useState(false);
+  const [connectForm, setConnectForm] = useState({
+    localPath: "",
+    name: "",
+    role: "backend" as ProjectRepositoryRole,
+    defaultBranch: "main",
+    githubUrl: "",
+    githubToken: "",
+  });
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+
+  // ── CP4.2 Path B: Initialize New Repository (Bootstrap) Modal ──────────────
+  const [isBootstrapOpen, setIsBootstrapOpen] = useState(false);
+  const [isLoadingPlan, setIsLoadingPlan] = useState(false);
+  const [bootstrapPlan, setBootstrapPlan] = useState<BootstrapPlan | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrapConfirmed, setBootstrapConfirmed] = useState(false);
+  const [customRepoRoot, setCustomRepoRoot] = useState("");
+  const [isBootstrapping, setIsBootstrapping] = useState(false);
+  const [bootstrapSuccess, setBootstrapSuccess] = useState<BootstrapResult | null>(null);
+
   const fetchRepositories = useCallback(async () => {
     try {
       setLoading(true);
@@ -123,7 +169,7 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
       const list = await projectApi.getRepositories(projectId);
 
       // If backend has no primary repository row yet, but project has githubUrl,
-      // synthesize primary repo card so primary repository is always visible
+      // synthesize primary repo card so primary repository is visible
       const hasPrimary = list.some((r) => r.isPrimary);
       if (!hasPrimary && project?.githubUrl) {
         const primarySynth: ProjectRepository = {
@@ -146,7 +192,6 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
       }
     } catch (err: any) {
       console.error("Failed to load repositories:", err);
-      // If error but project has githubUrl, fallback to showing primary
       if (project?.githubUrl) {
         setRepositories([
           {
@@ -165,17 +210,101 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
           },
         ]);
       } else {
-        setError(err.message || "Failed to load project repositories.");
+        setError(err.message || "Failed to load repositories");
       }
     } finally {
       setLoading(false);
     }
-  }, [projectId, project?.githubUrl, project?.name, project?.localPath]);
+  }, [projectId, project]);
 
   useEffect(() => {
     fetchRepositories();
   }, [fetchRepositories]);
 
+  // ── Handlers for Connect Existing Repository (Path A) ──────────────────────
+  const handleOpenConnectExisting = () => {
+    setConnectForm({
+      localPath: "",
+      name: project?.name || "",
+      role: "backend",
+      defaultBranch: "main",
+      githubUrl: "",
+      githubToken: "",
+    });
+    setConnectError(null);
+    setIsConnectOpen(true);
+  };
+
+  const handleConnectExisting = async () => {
+    if (!connectForm.localPath.trim()) {
+      setConnectError("Local repository filesystem path is required.");
+      return;
+    }
+    setIsConnecting(true);
+    setConnectError(null);
+    try {
+      await projectApi.bindExistingRepository(projectId, {
+        localPath: connectForm.localPath.trim(),
+        name: connectForm.name.trim() || undefined,
+        role: connectForm.role,
+        defaultBranch: connectForm.defaultBranch.trim() || "main",
+        githubUrl: connectForm.githubUrl.trim() || undefined,
+        githubToken: connectForm.githubToken.trim() || undefined,
+        isPrimary: true,
+      });
+      setIsConnectOpen(false);
+      await fetchRepositories();
+    } catch (err: any) {
+      setConnectError(err.message || "Failed to bind existing repository.");
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  // ── Handlers for Initialize New Repository (Path B) ────────────────────────
+  const handleOpenBootstrap = async () => {
+    setIsBootstrapOpen(true);
+    setIsLoadingPlan(true);
+    setBootstrapError(null);
+    setBootstrapConfirmed(false);
+    setBootstrapSuccess(null);
+    try {
+      const plan = await projectApi.getBootstrapPlan(projectId);
+      setBootstrapPlan(plan);
+      setCustomRepoRoot(plan.repositoryRoot);
+    } catch (err: any) {
+      setBootstrapError(err.message || "Failed to load repository bootstrap plan from Architecture authority.");
+    } finally {
+      setIsLoadingPlan(false);
+    }
+  };
+
+  const handleExecuteBootstrap = async () => {
+    if (!bootstrapPlan) return;
+    if (!bootstrapConfirmed) {
+      setBootstrapError("Owner confirmation is required before initializing repository.");
+      return;
+    }
+    setIsBootstrapping(true);
+    setBootstrapError(null);
+    try {
+      const res = await projectApi.executeBootstrap(projectId, {
+        idempotencyKey: bootstrapPlan.idempotencyKey,
+        confirmation: true,
+        repositoryRoot: customRepoRoot.trim() || bootstrapPlan.repositoryRoot,
+        templateId: bootstrapPlan.templateId,
+        name: project?.name || undefined,
+      });
+      setBootstrapSuccess(res);
+      await fetchRepositories();
+    } catch (err: any) {
+      setBootstrapError(err.message || "Failed to initialize repository baseline.");
+    } finally {
+      setIsBootstrapping(false);
+    }
+  };
+
+  // ── Handlers for Legacy Modal ─────────────────────────────────────────────
   const handleOpenAddModal = () => {
     setEditingRepo(null);
     setFormData({
@@ -200,7 +329,7 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
       name: repo.name,
       role: repo.role,
       githubUrl: repo.githubUrl,
-      githubToken: "", // Never populate token field on edit for security
+      githubToken: "",
       defaultBranch: repo.defaultBranch || "main",
       buildCommand: repo.buildCommand || "",
       testCommand: repo.testCommand || "",
@@ -257,7 +386,6 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
 
     try {
       if (editingRepo) {
-        // Update existing repository
         const updatePayload: Partial<CreateProjectRepositoryInput> = {
           name: formData.name.trim(),
           role: formData.role,
@@ -268,14 +396,12 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
           dependencies: formData.dependencies,
         };
 
-        // Only send githubToken if the user explicitly provided a new one
         if (formData.githubToken.trim().length > 0) {
           updatePayload.githubToken = formData.githubToken.trim();
         }
 
         await projectApi.updateRepository(projectId, editingRepo.id, updatePayload);
       } else {
-        // Create new secondary repository
         const createPayload: CreateProjectRepositoryInput = {
           name: formData.name.trim(),
           role: formData.role,
@@ -304,18 +430,13 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
 
   const handleDeleteRepository = async () => {
     if (!repoToDelete) return;
-    if (repoToDelete.isPrimary) {
-      setRepoToDelete(null);
-      return;
-    }
-
     setIsDeleting(true);
     try {
       await projectApi.deleteRepository(projectId, repoToDelete.id);
       setRepoToDelete(null);
       await fetchRepositories();
     } catch (e: any) {
-      alert(`Delete failed: ${e.message}`);
+      alert(`Failed to delete repository: ${e.message}`);
     } finally {
       setIsDeleting(false);
     }
@@ -346,33 +467,78 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
 
   return (
     <div className="space-y-6">
+      {/* ── Non-Owner Warning Banner ── */}
+      {!isOwner && (
+        <div
+          data-testid="owner-warning-banner"
+          className="text-xs text-amber-500 bg-amber-500/10 border border-amber-500/20 px-3 py-2 rounded-md flex items-center gap-2"
+        >
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span>Only the project owner can initialize, bind, or modify repository settings.</span>
+        </div>
+      )}
+
       {/* ── Top Header ── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b">
         <div>
           <div className="flex items-center gap-2.5">
             <h2 className="text-xl font-bold tracking-tight">Repositories</h2>
-            {totalRepos >= 2 ? (
+            {primaryRepo ? (
               <Badge className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs px-2.5 py-0.5 font-medium flex items-center gap-1">
                 <CheckCircle2 className="h-3 w-3" />
-                Multi-Repo Agent Enabled ({totalRepos} repos)
+                Baseline Bound ({primaryRepo.defaultBranch || "main"})
               </Badge>
             ) : (
-              <Badge variant="outline" className="text-xs text-muted-foreground px-2.5 py-0.5">
-                Single Repository
+              <Badge variant="outline" className="text-xs text-amber-400 border-amber-500/30 px-2.5 py-0.5">
+                No Baseline Bound
               </Badge>
             )}
           </div>
           <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-            {totalRepos >= 2
-              ? "All registered repositories participate in coordinated AI tasks and independent verification."
-              : "Add another repository to enable multi-repo agent workflows across your frontend, backend, or libraries."}
+            Connect an existing Git repository or bootstrap a new baseline from approved Architecture authority.
           </p>
         </div>
 
-        <Button onClick={handleOpenAddModal} className="gap-2 shrink-0">
-          <Plus className="h-4 w-4" />
-          Add Repository
-        </Button>
+        {/* ── Action Buttons ── */}
+        <div className="flex items-center gap-2 flex-wrap shrink-0">
+          <Button
+            id="btn-connect-existing"
+            variant="outline"
+            size="sm"
+            onClick={handleOpenConnectExisting}
+            disabled={!isOwner}
+            className="gap-1.5 text-xs"
+          >
+            <LinkIcon className="h-3.5 w-3.5" />
+            Connect Existing
+          </Button>
+
+          <Button
+            id="btn-init-new-repo"
+            size="sm"
+            onClick={handleOpenBootstrap}
+            disabled={!isOwner || Boolean(primaryRepo?.localPath)}
+            title={primaryRepo?.localPath ? "Project already has a bound primary repository" : ""}
+            className="gap-1.5 text-xs bg-primary text-primary-foreground hover:bg-primary/90"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            Initialize New Repository
+          </Button>
+
+          {primaryRepo && (
+            <Button
+              id="btn-add-secondary-repo"
+              variant="secondary"
+              size="sm"
+              onClick={handleOpenAddModal}
+              disabled={!isOwner}
+              className="gap-1.5 text-xs"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add Repo
+            </Button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -394,26 +560,68 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
         </div>
       ) : (
         <div className="space-y-6">
+          {/* ── No Repositories Empty State ── */}
+          {!primaryRepo && repositories.length === 0 && (
+            <Card className="border-dashed p-8 text-center bg-card/40">
+              <div className="max-w-md mx-auto space-y-4">
+                <div className="w-12 h-12 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto">
+                  <FolderGit2 className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-base">No Git Repository Bound</h3>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    To enable task execution, isolated worktrees, and bounded code generation, ANKA OS requires a valid Git repository baseline.
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+                  <Button
+                    id="btn-empty-connect-existing"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleOpenConnectExisting}
+                    disabled={!isOwner}
+                    className="gap-2 w-full sm:w-auto"
+                  >
+                    <LinkIcon className="h-4 w-4" />
+                    Connect Existing Repository
+                  </Button>
+
+                  <Button
+                    id="btn-empty-init-new"
+                    size="sm"
+                    onClick={handleOpenBootstrap}
+                    disabled={!isOwner}
+                    className="gap-2 w-full sm:w-auto"
+                  >
+                    <FolderPlus className="h-4 w-4" />
+                    Initialize New Repository
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          )}
+
           {/* ── Primary Repository Card ── */}
           {primaryRepo && (
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 <GitBranch className="h-3.5 w-3.5 text-primary" />
-                <span>Primary Repository</span>
+                <span>Primary Bound Repository</span>
               </div>
 
-              <Card className="border-primary/30 bg-primary/5 relative overflow-hidden">
+              <Card className="border-primary/30 bg-primary/5 relative overflow-hidden" data-testid="primary-repo-card">
                 <div className="absolute top-0 right-0 w-24 h-24 bg-primary/10 rounded-full blur-2xl pointer-events-none" />
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-4">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <CardTitle className="text-base font-bold flex items-center gap-2">
+                        <CardTitle className="text-base font-bold flex items-center gap-2" data-testid="repo-name">
                           <FolderGit2 className="h-4 w-4 text-primary" />
                           {primaryRepo.name}
                         </CardTitle>
                         <Badge className="bg-primary/20 text-primary border-primary/40 font-mono text-[11px]">
-                          PRIMARY
+                          PRIMARY BASELINE
                         </Badge>
                         <Badge
                           variant="outline"
@@ -422,15 +630,25 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
                           {ROLE_CONFIG[primaryRepo.role]?.label || primaryRepo.role}
                         </Badge>
                       </div>
-                      <a
-                        href={primaryRepo.githubUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1 w-fit"
-                      >
-                        <span>{primaryRepo.githubUrl}</span>
-                        <ExternalLink className="h-3 w-3 shrink-0" />
-                      </a>
+
+                      {primaryRepo.localPath && (
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono" data-testid="repo-local-path">
+                          <Terminal className="h-3 w-3 shrink-0 text-primary/70" />
+                          <span className="truncate">{primaryRepo.localPath}</span>
+                        </div>
+                      )}
+
+                      {primaryRepo.githubUrl && primaryRepo.githubUrl.startsWith("http") && (
+                        <a
+                          href={primaryRepo.githubUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1 w-fit"
+                        >
+                          <span>{primaryRepo.githubUrl}</span>
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                        </a>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -455,20 +673,31 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
                 <CardContent className="pt-0 text-xs">
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-primary/20">
                     <div>
-                      <span className="text-muted-foreground block text-[11px]">Default Branch</span>
-                      <span className="font-mono font-medium">{primaryRepo.defaultBranch || "main"}</span>
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground block text-[11px]">Authentication</span>
-                      <span className="inline-flex items-center gap-1 font-medium text-emerald-400">
-                        <ShieldCheck className="h-3.5 w-3.5" />
-                        Token configured
+                      <span className="text-muted-foreground block text-[11px]">Base Branch</span>
+                      <span className="font-mono font-medium" data-testid="repo-base-branch">
+                        {primaryRepo.defaultBranch || "main"}
                       </span>
                     </div>
+
                     <div>
-                      <span className="text-muted-foreground block text-[11px]">Management</span>
-                      <span className="text-muted-foreground">Managed via Settings</span>
+                      <span className="text-muted-foreground block text-[11px]">Baseline Commit</span>
+                      {primaryRepo.currentIndexedCommit ? (
+                        <span className="font-mono font-semibold text-emerald-400" data-testid="repo-baseline-commit">
+                          {primaryRepo.currentIndexedCommit.slice(0, 7)}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">Unindexed</span>
+                      )}
                     </div>
+
+                    <div>
+                      <span className="text-muted-foreground block text-[11px]">Worktree Readiness</span>
+                      <span className="inline-flex items-center gap-1 font-medium text-emerald-400">
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        Isolated Ready
+                      </span>
+                    </div>
+
                     <div>
                       <span className="text-muted-foreground block text-[11px]">Role</span>
                       <span className="font-medium capitalize">{primaryRepo.role}</span>
@@ -480,32 +709,15 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
           )}
 
           {/* ── Additional Repositories ── */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                <Layers className="h-3.5 w-3.5" />
-                <span>Additional Repositories ({secondaryRepos.length})</span>
-              </div>
-            </div>
-
-            {secondaryRepos.length === 0 ? (
-              <Card className="border-dashed p-8 text-center bg-card/40">
-                <div className="max-w-md mx-auto space-y-3">
-                  <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto">
-                    <Plus className="h-5 w-5" />
-                  </div>
-                  <h4 className="font-medium text-sm">No additional repositories registered</h4>
-                  <p className="text-xs text-muted-foreground">
-                    Connect companion repositories like a separate frontend, microservice backend, or shared package
-                    to unlock automated multi-repository task execution.
-                  </p>
-                  <Button onClick={handleOpenAddModal} variant="outline" size="sm" className="gap-2">
-                    <Plus className="h-3.5 w-3.5" />
-                    Add Repository
-                  </Button>
+          {secondaryRepos.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                  <Layers className="h-3.5 w-3.5" />
+                  <span>Additional Repositories ({secondaryRepos.length})</span>
                 </div>
-              </Card>
-            ) : (
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {secondaryRepos.map((repo) => {
                   const roleStyle = ROLE_CONFIG[repo.role] || ROLE_CONFIG.custom;
@@ -518,20 +730,17 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
                         <div className="flex items-start justify-between gap-2">
                           <div className="space-y-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-bold text-sm truncate">{repo.name}</span>
-                              <Badge variant="outline" className={`text-[10px] px-2 py-0 ${roleStyle.color}`}>
+                              <CardTitle className="text-sm font-semibold truncate flex items-center gap-1.5">
+                                <FolderGit2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                <span className="truncate">{repo.name}</span>
+                              </CardTitle>
+                              <Badge variant="outline" className={roleStyle.color}>
                                 {roleStyle.label}
                               </Badge>
                             </div>
-                            <a
-                              href={repo.githubUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1 truncate"
-                            >
-                              <span className="truncate">{repo.githubUrl}</span>
-                              <ExternalLink className="h-3 w-3 shrink-0" />
-                            </a>
+                            {repo.localPath && (
+                              <p className="text-xs text-muted-foreground font-mono truncate">{repo.localPath}</p>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-1 shrink-0">
@@ -539,313 +748,431 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
                               variant="ghost"
                               size="icon"
                               className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                              title="Sync Context"
                               onClick={() => handleSyncRepo(repo)}
                               disabled={isSyncing}
                             >
-                              <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin text-primary" : ""}`} />
+                              <RefreshCw
+                                className={`h-3 w-3 ${isSyncing ? "animate-spin text-primary" : isSyncSuccess ? "text-emerald-400" : ""}`}
+                              />
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                              title="Edit Repository"
-                              onClick={() => handleOpenEditModal(repo)}
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                              title="Delete Repository"
-                              onClick={() => setRepoToDelete(repo)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
+                            {isOwner && (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                  onClick={() => handleOpenEditModal(repo)}
+                                >
+                                  <Edit3 className="h-3 w-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                                  onClick={() => setRepoToDelete(repo)}
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </div>
                       </CardHeader>
-
-                      <CardContent className="pt-0 space-y-3 text-xs">
-                        <div className="grid grid-cols-2 gap-2 pt-2 border-t text-[11px]">
-                          <div>
-                            <span className="text-muted-foreground block">Branch</span>
-                            <span className="font-mono font-medium">{repo.defaultBranch || "main"}</span>
-                          </div>
-                          <div>
-                            <span className="text-muted-foreground block">Access Token</span>
-                            {repo.hasToken ? (
-                              <span className="inline-flex items-center gap-1 font-medium text-emerald-400">
-                                <ShieldCheck className="h-3 w-3" />
-                                Configured
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground">Public / None</span>
-                            )}
-                          </div>
-                        </div>
-
-                        {(repo.buildCommand || repo.testCommand) && (
-                          <div className="p-2 rounded bg-muted/40 font-mono text-[10px] space-y-1">
-                            {repo.buildCommand && (
-                              <div className="flex items-center gap-1.5 text-muted-foreground">
-                                <Terminal className="h-3 w-3 text-primary shrink-0" />
-                                <span className="text-foreground">{repo.buildCommand}</span>
-                              </div>
-                            )}
-                            {repo.testCommand && (
-                              <div className="flex items-center gap-1.5 text-muted-foreground">
-                                <Terminal className="h-3 w-3 text-emerald-400 shrink-0" />
-                                <span className="text-foreground">{repo.testCommand}</span>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {repo.dependencies && repo.dependencies.length > 0 && (
-                          <div className="space-y-1">
-                            <span className="text-[10px] text-muted-foreground uppercase font-semibold">
-                              Dependencies:
-                            </span>
-                            <div className="flex flex-wrap gap-1">
-                              {repo.dependencies.map((depId) => {
-                                const depRepo = repositories.find((r) => r.id === depId);
-                                return (
-                                  <Badge key={depId} variant="secondary" className="text-[10px] py-0 px-1.5">
-                                    {depRepo?.name || depId}
-                                  </Badge>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-
-                        {isSyncSuccess && (
-                          <div className="text-[11px] text-emerald-400 flex items-center gap-1">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Context snapshot synced successfully.
-                          </div>
-                        )}
-                      </CardContent>
                     </Card>
                   );
                 })}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Add / Edit Repository Modal ── */}
-      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-        <DialogContent className="sm:max-w-[520px]">
+      {/* ── CP4.2 Path A: Connect Existing Repository Dialog ── */}
+      <Dialog open={isConnectOpen} onOpenChange={setIsConnectOpen}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{editingRepo ? "Edit Repository" : "Add Repository"}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <LinkIcon className="h-5 w-5 text-primary" />
+              Connect Existing Repository
+            </DialogTitle>
             <DialogDescription>
-              {editingRepo
-                ? `Update configuration for "${editingRepo.name}".`
-                : "Register an additional repository under this project for multi-repository coordination."}
+              Bind an existing local Git repository within authorized workspace boundaries.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-2 text-sm">
-            {formError && (
-              <div className="p-3 rounded bg-destructive/10 border border-destructive/20 text-destructive text-xs">
-                {formError}
+          <div className="space-y-4 py-2">
+            {connectError && (
+              <div className="p-3 text-xs bg-destructive/10 border border-destructive/30 text-destructive rounded-md flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{connectError}</span>
               </div>
             )}
 
-            {/* Name & Role */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium">
-                  Repository Name <span className="text-destructive">*</span>
-                </label>
-                <Input
-                  placeholder="e.g. backend-api"
-                  value={formData.name}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, name: e.target.value }))}
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium">
-                  Repository Role <span className="text-destructive">*</span>
-                </label>
-                <Select
-                  value={formData.role}
-                  onValueChange={(v) => setFormData((prev) => ({ ...prev, role: v as ProjectRepositoryRole }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ALL_ROLES.map((roleKey) => (
-                      <SelectItem key={roleKey} value={roleKey}>
-                        {ROLE_CONFIG[roleKey]?.label || roleKey}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Local Repository Path *</label>
+              <Input
+                id="input-connect-local-path"
+                placeholder="e.g. C:/Users/PCC/Desktop/my-project or /path/to/repo"
+                value={connectForm.localPath}
+                onChange={(e) => setConnectForm((f) => ({ ...f, localPath: e.target.value }))}
+                className="font-mono text-xs"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Must be an existing, clean Git repository within approved workspace boundaries.
+              </p>
             </div>
 
-            {/* GitHub URL & Branch */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="sm:col-span-2 space-y-1.5">
-                <label className="text-xs font-medium">
-                  GitHub Repository URL <span className="text-destructive">*</span>
-                </label>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Repository Name</label>
                 <Input
-                  type="url"
-                  placeholder="https://github.com/org/repo"
-                  value={formData.githubUrl}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, githubUrl: e.target.value }))}
+                  id="input-connect-name"
+                  placeholder="e.g. my-app"
+                  value={connectForm.name}
+                  onChange={(e) => setConnectForm((f) => ({ ...f, name: e.target.value }))}
+                  className="text-xs"
                 />
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-medium">Default Branch</label>
+                <label className="text-xs font-medium">Base Branch</label>
                 <Input
+                  id="input-connect-branch"
                   placeholder="main"
-                  value={formData.defaultBranch}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, defaultBranch: e.target.value }))}
+                  value={connectForm.defaultBranch}
+                  onChange={(e) => setConnectForm((f) => ({ ...f, defaultBranch: e.target.value }))}
+                  className="text-xs font-mono"
                 />
               </div>
             </div>
 
-            {/* Token Input with Security Rules */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Role</label>
+              <Select
+                value={connectForm.role}
+                onValueChange={(val) => setConnectForm((f) => ({ ...f, role: val as ProjectRepositoryRole }))}
+              >
+                <SelectTrigger className="text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ALL_ROLES.map((r) => (
+                    <SelectItem key={r} value={r} className="text-xs">
+                      {ROLE_CONFIG[r].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Remote GitHub URL (Optional)</label>
+              <Input
+                id="input-connect-github-url"
+                placeholder="https://github.com/org/repo"
+                value={connectForm.githubUrl}
+                onChange={(e) => setConnectForm((f) => ({ ...f, githubUrl: e.target.value }))}
+                className="text-xs"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setIsConnectOpen(false)} disabled={isConnecting}>
+              Cancel
+            </Button>
+            <Button
+              id="btn-submit-connect-existing"
+              size="sm"
+              onClick={handleConnectExisting}
+              disabled={isConnecting}
+              className="gap-2"
+            >
+              {isConnecting && <Loader2 className="h-4 w-4 animate-spin" />}
+              Connect & Validate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── CP4.2 Path B: Initialize New Repository Dialog ── */}
+      <Dialog open={isBootstrapOpen} onOpenChange={setIsBootstrapOpen}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FolderPlus className="h-5 w-5 text-primary" />
+              Initialize New Repository
+            </DialogTitle>
+            <DialogDescription>
+              Create and bind a fresh Git baseline derived deterministically from approved Architecture authority.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="overflow-y-auto space-y-4 py-2 pr-1 flex-1">
+            {isLoadingPlan ? (
+              <div className="py-12 flex flex-col items-center justify-center text-muted-foreground space-y-3">
+                <Loader2 className="h-7 w-7 animate-spin text-primary" />
+                <p className="text-xs">Evaluating approved Architecture authority and preparing bootstrap plan...</p>
+              </div>
+            ) : bootstrapError ? (
+              <div
+                id="bootstrap-error-banner"
+                className="p-3 text-xs bg-destructive/10 border border-destructive/30 text-destructive rounded-md space-y-2"
+              >
+                <div className="flex items-center gap-2 font-semibold">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>Bootstrap Preflight Denied</span>
+                </div>
+                <p>{bootstrapError}</p>
+                <div className="pt-2">
+                  <Button variant="outline" size="sm" onClick={handleOpenBootstrap} className="text-xs">
+                    Retry Planning
+                  </Button>
+                </div>
+              </div>
+            ) : bootstrapSuccess ? (
+              <div
+                id="bootstrap-success-banner"
+                className="p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-lg space-y-3"
+              >
+                <div className="flex items-center gap-2 font-semibold">
+                  <CheckCircle2 className="h-5 w-5" />
+                  <span>Repository Initialized & Bound!</span>
+                </div>
+                <div className="space-y-1 text-xs">
+                  <p>
+                    <strong className="text-foreground">Baseline Commit:</strong>{" "}
+                    <code className="font-mono text-emerald-300">{bootstrapSuccess.baselineCommitSha}</code>
+                  </p>
+                  <p>
+                    <strong className="text-foreground">Base Branch:</strong>{" "}
+                    <code className="font-mono">{bootstrapSuccess.baseBranch}</code>
+                  </p>
+                  <p>
+                    <strong className="text-foreground">Technology Stack:</strong>{" "}
+                    {bootstrapSuccess.selectedStack.language} {bootstrapSuccess.selectedStack.framework ? `(${bootstrapSuccess.selectedStack.framework})` : ""}
+                  </p>
+                </div>
+                <Button size="sm" onClick={() => setIsBootstrapOpen(false)} className="w-full mt-2">
+                  Done
+                </Button>
+              </div>
+            ) : bootstrapPlan ? (
+              <div id="bootstrap-plan-view" className="space-y-4">
+                {/* Tech Stack Summary Card */}
+                <div className="p-3 rounded-lg border bg-card/60 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-muted-foreground uppercase text-[11px] tracking-wider">
+                      Resolved Technology Stack
+                    </span>
+                    <Badge variant="outline" className="font-mono text-xs">
+                      {bootstrapPlan.templateId}
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
+                    <div>
+                      <span className="text-muted-foreground block text-[10px]">Language</span>
+                      <span>{bootstrapPlan.selectedStack.language}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground block text-[10px]">Framework</span>
+                      <span>{bootstrapPlan.selectedStack.framework || "None"}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Target Root */}
+                <div className="space-y-1.5 text-xs">
+                  <label className="font-medium">Repository Root Directory *</label>
+                  <Input
+                    id="input-bootstrap-root"
+                    value={customRepoRoot}
+                    onChange={(e) => setCustomRepoRoot(e.target.value)}
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Must be within approved workspace boundaries and empty or non-existent.
+                  </p>
+                </div>
+
+                {/* Planned Foundational Files */}
+                <div className="space-y-2 text-xs">
+                  <label className="font-semibold text-muted-foreground uppercase text-[11px] tracking-wider">
+                    Planned Foundational Files ({bootstrapPlan.plannedFiles.length})
+                  </label>
+                  <div className="max-h-40 overflow-y-auto border rounded-md divide-y bg-muted/20">
+                    {bootstrapPlan.plannedFiles.map((file) => (
+                      <div key={file.path} className="p-2 flex items-start gap-2">
+                        <FileCode className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+                        <div className="min-w-0 flex-1">
+                          <p className="font-mono font-medium truncate">{file.path}</p>
+                          <p className="text-[11px] text-muted-foreground truncate">{file.description}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Explicit Owner Confirmation */}
+                <div className="p-3 rounded-lg border border-primary/30 bg-primary/5 space-y-2">
+                  <label
+                    htmlFor="checkbox-confirm-bootstrap"
+                    className="flex items-start gap-2 cursor-pointer text-xs font-medium"
+                  >
+                    <input
+                      id="checkbox-confirm-bootstrap"
+                      type="checkbox"
+                      checked={bootstrapConfirmed}
+                      onChange={(e) => setBootstrapConfirmed(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                    />
+                    <span>
+                      I explicitly authorize ANKA OS to scaffold foundational files, create the initial local Git commit, and bind this repository baseline to project tasks.
+                    </span>
+                  </label>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsBootstrapOpen(false)}
+              disabled={isBootstrapping}
+            >
+              Cancel
+            </Button>
+            {!bootstrapSuccess && bootstrapPlan && (
+              <Button
+                id="btn-confirm-bootstrap"
+                size="sm"
+                onClick={handleExecuteBootstrap}
+                disabled={!bootstrapConfirmed || isBootstrapping || !isOwner}
+                className="gap-2"
+              >
+                {isBootstrapping && <Loader2 className="h-4 w-4 animate-spin" />}
+                Confirm & Initialize
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Legacy Add/Edit Modal (Preserved for compatibility) ── */}
+      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingRepo ? "Edit Repository" : "Add Companion Repository"}</DialogTitle>
+            <DialogDescription>
+              {editingRepo
+                ? "Update repository details or build configuration."
+                : "Register a companion repository for multi-repo agent tasks."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            {formError && (
+              <div className="p-3 text-xs bg-destructive/10 border border-destructive/30 text-destructive rounded-md flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Repository Name *</label>
+              <Input
+                placeholder="e.g. mobile-app or shared-utils"
+                value={formData.name}
+                onChange={(e) => setFormData((f) => ({ ...f, name: e.target.value }))}
+                className="text-xs"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Role *</label>
+              <Select
+                value={formData.role}
+                onValueChange={(val) => setFormData((f) => ({ ...f, role: val as ProjectRepositoryRole }))}
+              >
+                <SelectTrigger className="text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ALL_ROLES.map((r) => (
+                    <SelectItem key={r} value={r} className="text-xs">
+                      {ROLE_CONFIG[r].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">GitHub Repository URL *</label>
+              <Input
+                placeholder="https://github.com/org/repo"
+                value={formData.githubUrl}
+                onChange={(e) => setFormData((f) => ({ ...f, githubUrl: e.target.value }))}
+                className="text-xs"
+              />
+            </div>
+
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium">GitHub Personal Access Token</label>
-                {editingRepo?.hasToken && (
-                  <span className="text-[11px] text-emerald-400 flex items-center gap-1 font-medium">
-                    <ShieldCheck className="h-3 w-3" />
-                    Token configured
-                  </span>
-                )}
-              </div>
-              <div className="relative flex gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    type={showToken ? "text" : "password"}
-                    placeholder={
-                      editingRepo?.hasToken
-                        ? "Leave blank to keep existing token"
-                        : "ghp_xxxxxxxxxxxx"
-                    }
-                    value={formData.githubToken}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, githubToken: e.target.value }))}
-                    className="pr-9"
-                  />
+                <label className="text-xs font-medium">GitHub Token (Optional)</label>
+                {formData.githubToken && (
                   <button
                     type="button"
-                    onClick={() => setShowToken(!showToken)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
-                </div>
-                {formData.githubToken.length >= 10 && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
                     onClick={handleValidateToken}
                     disabled={validatingToken}
-                    className="shrink-0 text-xs"
+                    className="text-[11px] text-primary hover:underline flex items-center gap-1"
                   >
-                    {validatingToken ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Validate"}
-                  </Button>
+                    {validatingToken ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldCheck className="h-3 w-3" />}
+                    Validate
+                  </button>
                 )}
               </div>
-              {tokenValidationMsg && (
-                <p
-                  className={`text-xs mt-1 ${
-                    tokenValidationMsg.valid ? "text-emerald-400" : "text-destructive"
-                  }`}
+              <div className="relative">
+                <Input
+                  type={showToken ? "text" : "password"}
+                  placeholder={editingRepo ? "(leave blank to keep existing)" : "ghp_..."}
+                  value={formData.githubToken}
+                  onChange={(e) => setFormData((f) => ({ ...f, githubToken: e.target.value }))}
+                  className="text-xs pr-8 font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-2 top-2.5 text-muted-foreground hover:text-foreground"
                 >
+                  {showToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+              {tokenValidationMsg && (
+                <p className={`text-[11px] ${tokenValidationMsg.valid ? "text-emerald-400" : "text-destructive"}`}>
                   {tokenValidationMsg.text}
                 </p>
               )}
             </div>
 
-            {/* Build & Test Commands */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium">Build Command (optional)</label>
-                <Input
-                  placeholder="e.g. npm run build"
-                  value={formData.buildCommand}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, buildCommand: e.target.value }))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium">Test Command (optional)</label>
-                <Input
-                  placeholder="e.g. npm test"
-                  value={formData.testCommand}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, testCommand: e.target.value }))}
-                />
-              </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Default Branch</label>
+              <Input
+                placeholder="main"
+                value={formData.defaultBranch}
+                onChange={(e) => setFormData((f) => ({ ...f, defaultBranch: e.target.value }))}
+                className="text-xs font-mono"
+              />
             </div>
-
-            {/* Dependencies */}
-            {repositories.filter((r) => !editingRepo || r.id !== editingRepo.id).length > 0 && (
-              <div className="space-y-1.5 pt-1">
-                <label className="text-xs font-medium">Dependencies (optional)</label>
-                <p className="text-[11px] text-muted-foreground mb-1.5">
-                  Select other repositories that this repository depends on:
-                </p>
-                <div className="space-y-1 max-h-28 overflow-y-auto border rounded p-2 bg-background/50">
-                  {repositories
-                    .filter((r) => !editingRepo || r.id !== editingRepo.id)
-                    .map((r) => {
-                      const isChecked = formData.dependencies.includes(r.id);
-                      return (
-                        <label
-                          key={r.id}
-                          className="flex items-center gap-2 text-xs py-1 px-1.5 rounded hover:bg-muted/40 cursor-pointer"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setFormData((prev) => ({
-                                  ...prev,
-                                  dependencies: [...prev.dependencies, r.id],
-                                }));
-                              } else {
-                                setFormData((prev) => ({
-                                  ...prev,
-                                  dependencies: prev.dependencies.filter((id) => id !== r.id),
-                                }));
-                              }
-                            }}
-                            className="rounded border-input text-primary focus:ring-primary h-3.5 w-3.5"
-                          />
-                          <span className="font-medium">{r.name}</span>
-                          <span className="text-[10px] text-muted-foreground">({r.role})</span>
-                          {r.isPrimary && (
-                            <Badge variant="outline" className="text-[9px] py-0 px-1">
-                              Primary
-                            </Badge>
-                          )}
-                        </label>
-                      );
-                    })}
-                </div>
-              </div>
-            )}
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsModalOpen(false)} disabled={isSubmitting}>
+            <Button variant="outline" size="sm" onClick={() => setIsModalOpen(false)} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button onClick={handleSaveRepository} disabled={isSubmitting} className="gap-2">
+            <Button size="sm" onClick={handleSaveRepository} disabled={isSubmitting} className="gap-2">
               {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
               {editingRepo ? "Save Changes" : "Add Repository"}
             </Button>
@@ -860,7 +1187,7 @@ export function ProjectRepositories({ projectId, project }: ProjectRepositoriesP
             <AlertDialogTitle>Remove Repository?</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to remove <strong>{repoToDelete?.name}</strong> from this project? The
-              underlying GitHub repository will not be affected.
+              underlying Git repository on disk will not be deleted.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

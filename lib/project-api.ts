@@ -1,4 +1,4 @@
-import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, Sprint, ChecklistItem, GitCommitItem, GitBranchItem, GitPullItem, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowPhase, WorkflowRun, ProjectRepository, CreateProjectRepositoryInput, PhaseReadiness, KanbanBoard, ImplementationExecution, ImplementationTask, DocumentExtractionSummary, EvidencePageResponse, LiveBriefWorkspace, LiveBriefRevision, LiveBriefConfirmation, ArtifactCurrentnessInfo, ArtifactDiffSummary } from "./types";
+import type { Project, Task, ProjectFile, Activity, Comment, ProjectChatMessage, ProjectMember, Sprint, ChecklistItem, GitCommitItem, GitBranchItem, GitPullItem, ProjectPhaseState, PhaseArtifact, PhaseApproval, WorkflowPhase, WorkflowRun, ProjectRepository, CreateProjectRepositoryInput, PhaseReadiness, KanbanBoard, ImplementationExecution, ImplementationTask, DocumentExtractionSummary, EvidencePageResponse, LiveBriefWorkspace, LiveBriefRevision, LiveBriefConfirmation, ArtifactCurrentnessInfo, ArtifactDiffSummary, BootstrapPlan, BootstrapResult, BindExistingRepositoryInput, BootstrapTemplateInfo } from "./types";
 
 export interface AppNotification {
   id: string;
@@ -125,7 +125,8 @@ function mapTask(t: any, projectId: string): Task {
 function mapProject(p: any): Project {
   return {
     id: p.id,
-    ownerId: p.userId,
+    ownerId: p.ownerId || p.userId,
+    userId: p.userId || p.ownerId,
     name: p.name,
     description: p.description || "",
     phase: p.phase || "product-modeling",
@@ -977,8 +978,13 @@ export const projectApi = {
     return apiRequest(`/projects/${projectId}/kanban`);
   },
 
-  async generateKanbanBoard(projectId: string): Promise<KanbanBoard> {
-    return apiRequest(`/projects/${projectId}/kanban/generate`, { method: "POST" });
+  async generateKanbanBoard(projectId: string, idempotencyKey?: string): Promise<KanbanBoard> {
+    const headers = idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined;
+    return apiRequest(`/projects/${projectId}/kanban/generate`, {
+      method: "POST",
+      headers,
+      body: idempotencyKey ? JSON.stringify({ idempotencyKey }) : undefined,
+    });
   },
 
   async updateImplementationTask(projectId: string, taskId: string, payload: Partial<Pick<ImplementationTask, "title" | "description" | "acceptanceCriteria" | "targetFiles" | "repositoryId">> & { expectedStateVersion: number }): Promise<ImplementationTask> {
@@ -1086,6 +1092,60 @@ export const projectApi = {
       throw new Error(err.message || err.error || `DELETE /projects/${projectId}/repositories/${repoId} failed: ${res.status}`);
     }
     return res.json();
+  },
+
+  async bindExistingRepository(projectId: string, payload: BindExistingRepositoryInput): Promise<ProjectRepository> {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/repositories/bind-existing`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `Failed to bind repository: ${res.status}`);
+    }
+    const { data } = await res.json();
+    return data;
+  },
+
+  async getBootstrapPlan(projectId: string, payload: { templateId?: string; repositoryRoot?: string; idempotencyKey?: string } = {}): Promise<BootstrapPlan> {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/repositories/bootstrap-plan`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `Failed to prepare bootstrap plan: ${res.status}`);
+    }
+    const { data } = await res.json();
+    return data;
+  },
+
+  async executeBootstrap(projectId: string, payload: { idempotencyKey: string; confirmation: boolean; repositoryRoot?: string; templateId?: string; name?: string }): Promise<BootstrapResult> {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/repositories/bootstrap-init`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `Failed to initialize repository: ${res.status}`);
+    }
+    const { data } = await res.json();
+    return data;
+  },
+
+  async getBootstrapTemplates(projectId: string): Promise<BootstrapTemplateInfo[]> {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/repositories/bootstrap-templates`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `Failed to fetch templates: ${res.status}`);
+    }
+    const { data } = await res.json();
+    return data;
   },
 };
 

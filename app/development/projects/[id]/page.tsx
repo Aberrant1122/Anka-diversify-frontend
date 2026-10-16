@@ -699,7 +699,7 @@ export default function ProjectDetailPage({
           </div>
 
           {/* ── Tabs ── */}
-          <Tabs value={activeTab} className="w-full" onValueChange={(v) => { setActiveTab(v); router.replace(`/development/projects/${id}?tab=${encodeURIComponent(v)}`, { scroll: false }); if (v === "activity") refreshActivities(); if (v === "workflow") refreshPhaseStates(); }}>
+          <Tabs value={activeTab} className="w-full" onValueChange={(v) => { setActiveTab(v); if (id) { try { router.replace(`/development/projects/${id}?tab=${encodeURIComponent(v)}`, { scroll: false }); } catch {} } if (v === "activity") refreshActivities(); if (v === "workflow") refreshPhaseStates(); }}>
             <div className="px-4 border-t bg-card/30 backdrop-blur-md overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
               <TabsList className="h-12 bg-transparent gap-1.5 sm:gap-2 w-max sm:w-full justify-start py-1">
                 {[

@@ -389,6 +389,11 @@ export interface PhaseReadiness {
 export interface KanbanTaskDependency {
   taskId: string;
   dependencyTaskId: string;
+  dependencyTask?: {
+    id: string;
+    title: string;
+    implementationState?: string | null;
+  };
 }
 
 export interface ImplementationExecution {
@@ -544,6 +549,9 @@ export interface ProjectRepository {
   lintCommand?: string | null;
   typecheckCommand?: string | null;
   localPath?: string | null;
+  currentIndexedCommit?: string | null;
+  languages?: string[];
+  frameworks?: string[];
   isPrimary: boolean;
   dependencies?: string[];
   hasToken: boolean;
@@ -563,6 +571,59 @@ export interface CreateProjectRepositoryInput {
   typecheckCommand?: string;
   dependencies?: string[];
   localPath?: string;
+}
+
+export interface BindExistingRepositoryInput {
+  localPath: string;
+  name?: string;
+  role?: ProjectRepositoryRole | string;
+  defaultBranch?: string;
+  githubUrl?: string;
+  githubToken?: string;
+  isPrimary?: boolean;
+}
+
+export interface BootstrapPlan {
+  idempotencyKey: string;
+  templateId: string;
+  templateName: string;
+  description: string;
+  selectedStack: {
+    language: string;
+    framework?: string;
+    buildCommand?: string;
+    testCommand?: string;
+    lintCommand?: string;
+    typecheckCommand?: string;
+  };
+  repositoryRoot: string;
+  baseBranch: string;
+  architectureFingerprint: string;
+  plannedFiles: Array<{
+    path: string;
+    description: string;
+    preview?: string;
+  }>;
+  status: "PREPARED";
+}
+
+export interface BootstrapResult {
+  repository: ProjectRepository;
+  baselineCommitSha: string;
+  baseBranch: string;
+  selectedStack: {
+    language: string;
+    framework?: string;
+  };
+  attemptId: string;
+}
+
+export interface BootstrapTemplateInfo {
+  id: string;
+  name: string;
+  language: string;
+  framework?: string;
+  description: string;
 }
 
 export interface ArtifactCurrentnessInfo {
