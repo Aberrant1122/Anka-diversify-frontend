@@ -1,4 +1,5 @@
 "use client";
+import { WorkspaceWorkflow } from "@/components/project/WorkspaceWorkflow";
 
 import { useState, use, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -98,7 +99,7 @@ const phaseColors: Record<string, string> = {
   completed: "bg-success/20 text-success border-success/30",
 };
 const phaseLabels: Record<string, string> = {
-  "product-modeling": "Product Modeling",
+  "product-modeling": "Legacy planning",
   development: "Development",
   marketing: "Marketing",
   completed: "Completed",
@@ -228,38 +229,6 @@ export default function ProjectDetailPage({
     }
   };
 
-  // ── members state ──
-  const [members, setMembers] = useState<ProjectMember[]>([]);
-  const [allUsers, setAllUsers] = useState<TeamUser[]>([]);
-  const [memberLoading, setMemberLoading] = useState(false);
-  const [memberError, setMemberError] = useState<string | null>(null);
-
-  useEffect(() => {
-    projectApi.getMembers(id).then(setMembers).catch(() => { });
-    inviteApi.listUsers().then(setAllUsers).catch(() => { });
-  }, [id]);
-
-  const handleAddMember = async (userId: string) => {
-    setMemberLoading(true);
-    setMemberError(null);
-    try {
-      await projectApi.addMember(id, userId);
-      const updated = await projectApi.getMembers(id);
-      setMembers(updated);
-    } catch (e: any) {
-      setMemberError(e.message);
-    } finally {
-      setMemberLoading(false);
-    }
-  };
-
-  const handleRemoveMember = async (userId: string) => {
-    try {
-      await projectApi.removeMember(id, userId);
-      setMembers((prev) => prev.filter((m) => m.id !== userId));
-    } catch { /* silent */ }
-  };
-
   // ── phased workflow state ──
   const [phaseStates, setPhaseStates] = useState<ProjectPhaseState[]>([]);
   const [workflowPhase, setWorkflowPhase] = useState<WorkflowPhase>("requirements");
@@ -272,10 +241,10 @@ export default function ProjectDetailPage({
   // Always starts as "kanban" so the client's first render matches the server's
   // (sessionStorage doesn't exist during SSR) — the saved tab is restored right
   // after mount instead, avoiding a hydration mismatch on whichever tab was last active.
-  const [activeTab, setActiveTab] = useState("kanban");
+  const [activeTab, setActiveTab] = useState("workflow");
   useEffect(() => {
     const saved = sessionStorage.getItem(`project-tab-${id}`);
-    if (saved) setActiveTab(saved);
+    if (saved) setActiveTab(saved === "ai-assistant" ? "workflow" : saved);
   }, [id]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -291,7 +260,7 @@ export default function ProjectDetailPage({
   const [agentTaskRequest, setAgentTaskRequest] = useState<{ taskId: string; title: string; description?: string } | null>(null);
   const handleRunAgentOnTask = (task: Task) => {
     setAgentTaskRequest({ taskId: task.id, title: task.title, description: task.description });
-    setActiveTab("ai-assistant");
+    setActiveTab("workflow");
   };
 
   // Marks a task done after the agent's batch run for it has been pushed —
@@ -703,21 +672,7 @@ export default function ProjectDetailPage({
 
             {/* Stats bar */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-              {members.length > 0 && (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center -space-x-2">
-                      {members.slice(0, 4).map((member) => (
-                        <Avatar key={member.id} className="h-6 w-6 sm:h-7 sm:w-7 border-2 border-background">
-                          <AvatarFallback className="text-[10px] sm:text-xs">{(member.name || member.email).slice(0, 2).toUpperCase()}</AvatarFallback>
-                        </Avatar>
-                      ))}
-                    </div>
-                    <span className="text-xs sm:text-sm text-muted-foreground whitespace-nowrap">{members.length} member{members.length !== 1 ? "s" : ""}</span>
-                  </div>
-                  <div className="h-4 w-px bg-border hidden xs:block" />
-                </>
-              )}
+
               <div className="flex items-center gap-2 text-xs sm:text-sm">
                 <Calendar className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground" />
                 <span className="text-muted-foreground">Due:</span>
@@ -745,7 +700,7 @@ export default function ProjectDetailPage({
                   { id: "chat", label: "Chat", icon: MessageSquare },
                   { id: "activity", label: "Activity", icon: ActivityIcon },
                   { id: "ai-assistant", label: "AI Agent", icon: Zap, badge: "Multi-Stage" },
-                ].map(({ id: tabId, label, icon: Icon, badge }) => (
+                ].filter(tab=>tab.id!=="ai-assistant").map(({ id: tabId, label, icon: Icon, badge }) => (
                   <TabsTrigger
                     key={tabId}
                     value={tabId}
@@ -770,8 +725,7 @@ export default function ProjectDetailPage({
               forceMount
               style={activeTab !== "workflow" ? { display: "none" } : undefined}
             >
-              <PhaseStepper states={phaseStates} activePhase={workflowPhase} onSelectPhase={setWorkflowPhase} />
-              <PhaseDetailView projectId={id} phase={workflowPhase} onStatesChange={setPhaseStates} />
+              <WorkspaceWorkflow projectId={id} />
             </TabsContent>
 
             {/* ── Kanban ── */}
@@ -785,7 +739,7 @@ export default function ProjectDetailPage({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="all">All Phases</SelectItem>
-                        <SelectItem value="product-modeling">Product Modeling</SelectItem>
+                        <SelectItem value="product-modeling">Legacy planning</SelectItem>
                         <SelectItem value="development">Development</SelectItem>
                         <SelectItem value="marketing">Marketing</SelectItem>
                       </SelectContent>
@@ -903,7 +857,7 @@ export default function ProjectDetailPage({
                                   {/* Run Agent on this task */}
                                   <button
                                     className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-muted-foreground hover:text-primary"
-                                    title="Run Agent on this task"
+                                    title="Open document workflow for this task"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleRunAgentOnTask(task);
@@ -1245,7 +1199,7 @@ export default function ProjectDetailPage({
                   <Select value={editForm.phase} onValueChange={(v) => setEditForm((f) => ({ ...f, phase: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="product-modeling">Product Modeling</SelectItem>
+                      <SelectItem value="product-modeling">Legacy planning</SelectItem>
                       <SelectItem value="development">Development</SelectItem>
                       <SelectItem value="marketing">Marketing</SelectItem>
                       <SelectItem value="completed">Completed</SelectItem>
@@ -1289,62 +1243,10 @@ export default function ProjectDetailPage({
                   value={editForm.localPath}
                   onChange={(e) => setEditForm((f) => ({ ...f, localPath: e.target.value }))}
                 />
-                <p className="text-xs text-muted-foreground">Where this repo is cloned on your machine. The terminal will start here and the AI agent will write changes directly to these files.</p>
+                <p className="text-xs text-muted-foreground">Legacy repository location. Execution uses a managed isolated workspace after document approval.</p>
               </div>
 
-              {/* ── Team Members ── */}
-              <div className="flex flex-col gap-2 pt-2 border-t">
-                <label className="text-sm font-medium">Team Members</label>
 
-                {/* Current members */}
-                <div className="space-y-1.5">
-                  {members.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No members yet.</p>
-                  ) : (
-                    members.map((m) => (
-                      <div key={m.id} className="flex items-center justify-between gap-2 p-1.5 rounded-md hover:bg-muted/50">
-                        <div className="flex items-center gap-2">
-                          <Avatar className="h-6 w-6">
-                            <AvatarFallback className="text-xs">{(m.name || m.email).slice(0, 2).toUpperCase()}</AvatarFallback>
-                          </Avatar>
-                          <div>
-                            <p className="text-xs font-medium">{m.name || m.email}</p>
-                            <p className="text-xs text-muted-foreground capitalize">{m.role}</p>
-                          </div>
-                        </div>
-                        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={() => handleRemoveMember(m.id)}>
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                {/* Add member */}
-                <div className="flex gap-2">
-                  <Select
-                    onValueChange={(userId) => handleAddMember(userId)}
-                    disabled={memberLoading}
-                  >
-                    <SelectTrigger className="flex-1 h-8 text-xs">
-                      <SelectValue placeholder="Add a team member…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {allUsers
-                        .filter((u) => !members.some((m) => m.id === u.id))
-                        .map((u) => (
-                          <SelectItem key={u.id} value={u.id}>
-                            <span className="text-xs">{u.name || u.email} <span className="text-muted-foreground capitalize">· {u.role}</span></span>
-                          </SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
-                  <Button size="icon" className="h-8 w-8 shrink-0" variant="outline" disabled>
-                    <UserPlus className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-                {memberError && <p className="text-xs text-destructive">{memberError}</p>}
-              </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setIsEditOpen(false)}>Cancel</Button>
@@ -1441,7 +1343,7 @@ export default function ProjectDetailPage({
                   <Select value={newTask.phase} onValueChange={(v) => setNewTask((t) => ({ ...t, phase: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="product-modeling">Product Modeling</SelectItem>
+                      <SelectItem value="product-modeling">Legacy planning</SelectItem>
                       <SelectItem value="development">Development</SelectItem>
                       <SelectItem value="marketing">Marketing</SelectItem>
                     </SelectContent>
@@ -1543,7 +1445,7 @@ export default function ProjectDetailPage({
                   <Select value={newFile.phase} onValueChange={(v) => setNewFile((f) => ({ ...f, phase: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="product-modeling">Product Modeling</SelectItem>
+                      <SelectItem value="product-modeling">Legacy planning</SelectItem>
                       <SelectItem value="development">Development</SelectItem>
                       <SelectItem value="marketing">Marketing</SelectItem>
                     </SelectContent>

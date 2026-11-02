@@ -173,9 +173,6 @@ export function Header({ title, breadcrumb }: HeaderProps) {
             <DropdownMenuItem asChild>
               <Link href="/settings">Settings</Link>
             </DropdownMenuItem>
-            <DropdownMenuItem asChild>
-              <Link href="/team">Team</Link>
-            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={handleSignOut}
