@@ -38,33 +38,14 @@ interface NavItem {
   children?: NavItem[]
 }
 
-const adminNav: NavItem[] = [
-  { label: "Dashboard", href: "/admin", icon: LayoutDashboard },
-  { label: "Users", href: "/admin/users", icon: Users },
-  { label: "Rules", href: "/admin/rules", icon: ShieldCheck },
-  { label: "Departments", href: "/admin/departments", icon: Building2 },
-]
-
 const developmentNav: NavItem[] = [
   { label: "Overview", href: "/development", icon: LayoutDashboard },
   { label: "Projects", href: "/development/projects", icon: FolderKanban },
   { label: "Sprints", href: "/development/sprints", icon: Calendar },
   { label: "Documents", href: "/development/documents", icon: FileText },
-  { label: "Terminal", href: "/development/terminal", icon: Terminal },
   { label: "Git", href: "/development/git", icon: GitBranch },
   { label: "AI Assistant", href: "/development/ai-assistant", icon: Bot },
   { label: "Project Chats", href: "/development/chats", icon: MessageSquare },
-]
-
-const productModelingNav: NavItem[] = [
-  { label: "Overview", href: "/product-modeling", icon: LayoutDashboard },
-  { label: "Research", href: "/product-modeling/research", icon: Lightbulb },
-  { label: "Prototypes", href: "/product-modeling/prototypes", icon: Palette },
-  { label: "Roadmap", href: "/product-modeling/roadmap", icon: Map },
-]
-
-const teamNav: NavItem[] = [
-  { label: "Team Board", href: "/team", icon: UsersRound },
 ]
 
 interface DepartmentSection {
@@ -75,15 +56,12 @@ interface DepartmentSection {
 }
 
 const departments: DepartmentSection[] = [
-  { name: "Admin", icon: ShieldCheck, basePath: "/admin", items: adminNav },
-  { name: "Development", icon: Code2, basePath: "/development", items: developmentNav },
-  { name: "Product Modeling", icon: Package, basePath: "/product-modeling", items: productModelingNav },
-  { name: "Team", icon: UsersRound, basePath: "/team", items: teamNav },
+  { name: "Workspace", icon: Code2, basePath: "/development", items: developmentNav },
 ]
 
 export function Sidebar() {
   const pathname = usePathname()
-  const [expandedSections, setExpandedSections] = useState<string[]>(["Admin", "Development"])
+  const [expandedSections, setExpandedSections] = useState<string[]>(["Workspace"])
 
   const toggleSection = (name: string) => {
     setExpandedSections(prev =>
