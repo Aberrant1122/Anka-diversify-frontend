@@ -326,12 +326,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
     ...(architecture?.questions || []),
   ].filter((q) => q.blocking);
   if(architecture && architecturePurpose(architecture)===null)return <div role="alert">Unsupported or mixed-purpose Architecture. Refresh the documents.</div>;
-  // Schema2 selects the baseline purpose; it never enters implementation actions.
-  if (architecture?.schemaVersion === 2) {
-    if(!mainRevision || mainRevision.kind !== "MAIN" || !archRevision) return <div role="alert">A current Main and Architecture are required for baseline validation.</div>;
-    if (!Array.isArray(architecture.validationProfiles)) return <div role="alert">Invalid baseline Architecture. Refresh the documents.</div>;
-    return <BaselineValidationPanel key={projectId+':'+mainRevision.contentHash+':'+archRevision.contentHash} projectId={projectId} mainRevision={mainRevision} architectureRevision={archRevision as WorkspaceRevision<ValidationArchitectureDocument>} onRefresh={load}/>;
-  }
+  const baselineMode = architecture?.schemaVersion === 2 || (archRevision?.content as {schemaVersion?:number}|undefined)?.schemaVersion === 2;
   const save = (
     kind: "MAIN" | "ARCHITECTURE",
     content: MainDocument | ArchitectureDocument,
@@ -434,6 +429,11 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
     });
   const draftArchitecture = () => {
     if (!mainRevision || !main) return;
+    if (architecture?.schemaVersion === 2) {
+      // Reconcile the immutable Main link without changing purpose, profiles or units.
+      setArchitecture({...architecture,sourceMain:{id:mainRevision.id,hash:mainRevision.contentHash}});
+      return;
+    }
     const repo = view.repositories[0];
     setArchitecture({
       schemaVersion: 1,
@@ -527,11 +527,10 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
     <div className="p-4 md:p-6 space-y-6 max-w-6xl">
       <div>
         <h2 className="text-xl font-semibold">
-          Project documents and implementation
+          {baselineMode ? "Project documents and baseline validation" : "Project documents and implementation"}
         </h2>
         <p className="text-sm text-muted-foreground">
-          Brief → Main Document → Architecture → implementation → review.
-          Approve the exact Architecture version to authorize work.
+          {baselineMode ? "Edit and save Main and Architecture revisions, then preview the exact baseline validation scope." : "Brief → Main Document → Architecture → implementation → review. Approve the exact Architecture version to authorize work."}
         </p>
       </div>
       {error && (
@@ -542,7 +541,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
           {error}
         </p>
       )}
-      {capabilities.aiGeneration && (
+      {capabilities.aiGeneration && !baselineMode && (
         <p className="text-sm text-muted-foreground">
           AI drafts and code proposals require review. Generation never approves
           documents or applies code.
@@ -572,7 +571,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
           >
             Create Main draft from brief
           </Button>
-          {capabilities.aiGeneration && (
+          {capabilities.aiGeneration && !baselineMode && (
             <Button
               disabled={busy || !brief.trim() || !!dirtyMain || !!dirtyArch}
               onClick={() => generate("MAIN")}
@@ -715,9 +714,9 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
               disabled={busy || !!dirtyMain}
               onClick={draftArchitecture}
             >
-              Create reconciled Architecture draft
+              {baselineMode ? "Reconcile Architecture with current Main" : "Create reconciled Architecture draft"}
             </Button>
-            {capabilities.aiGeneration && (
+            {capabilities.aiGeneration && !baselineMode && (
               <Button
                 disabled={busy || !!dirtyMain || !!dirtyArch}
                 onClick={() => generate("ARCHITECTURE")}
@@ -762,7 +761,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
               {view.repositories.map((repo) => (
                 <div key={repo.id} className="block text-sm">
                   {repo.name}
-                  {!repo.materialized && (
+                  {!baselineMode && !repo.materialized && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -824,6 +823,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
                   />
                 </div>
               ))}
+              {!baselineMode && <>
               <h4 className="font-medium">Implementation units</h4>
               {architecture.units.map((u, i: number) => (
                 <div key={u.id} className="space-y-2 border rounded p-3">
@@ -1052,6 +1052,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
               <Button size="sm" variant="outline" onClick={addUnit}>
                 Add implementation unit
               </Button>
+              </>}
               <Questions
                 value={architecture.questions}
                 onChange={(questions) =>
@@ -1075,7 +1076,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
         </section>
       )}
       <section className="space-y-3 border rounded-lg p-4">
-        <h3 className="font-semibold">Differences, impact and approval</h3>
+        <h3 className="font-semibold">{baselineMode ? "Document history and impact" : "Differences, impact and approval"}</h3>
         {[mainRevision, archRevision].filter(Boolean).map((doc) => {
           const d = doc as WorkspaceRevision;
           const previous = view.documents.find((p) => p.id === d.previousId);
@@ -1112,6 +1113,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
             approval.
           </p>
         )}
+        {!baselineMode && (
         <Button
           disabled={
             busy ||
@@ -1138,7 +1140,13 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
             ? "Architecture approved"
             : "Approve exact Architecture and linked Main"}
         </Button>
+        )}
       </section>
+      {baselineMode && mainRevision && mainRevision.kind === 'MAIN' && archRevision && (archRevision.content as {schemaVersion?:number}).schemaVersion === 2 && (
+        <BaselineValidationPanel key={projectId+':'+mainRevision.contentHash+':'+archRevision.contentHash+':'+(dirtyMain||dirtyArch?'dirty':'saved')} projectId={projectId} mainRevision={mainRevision} architectureRevision={archRevision as WorkspaceRevision<ValidationArchitectureDocument>} documentsDirty={!!dirtyMain||!!dirtyArch} externalBusy={busy} onRefresh={load}/>
+      )}
+      {(dirtyMain || dirtyArch) && <Button variant="outline" disabled={busy} onClick={()=>{applySnapshot(view,capabilities);setReason('');}}>Discard unsaved document edits</Button>}
+      {!baselineMode && <>
       {approval && (
         <section className="space-y-3 border rounded-lg p-4">
           <h3 className="font-semibold">Authorized implementation</h3>
@@ -1351,6 +1359,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
           real signed-in acceptance require separate release evidence.
         </p>
       </section>
+      </>}
     </div>
   );
 }
