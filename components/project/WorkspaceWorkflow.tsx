@@ -1,4 +1,5 @@
 "use client";
+import { BaselineValidationPanel } from "./BaselineValidationPanel";
 import { ExecutionActions } from "./WorkspaceExecutionActions";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,9 @@ import {
   Unit,
   GenerationOperation,
   isImplementation,
+  isImplementationRun,
+  architecturePurpose,
+  ValidationArchitectureDocument,
   isDocumentChange,
 } from "@/lib/workspace-api";
 
@@ -321,6 +325,13 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
     ...(main?.questions || []),
     ...(architecture?.questions || []),
   ].filter((q) => q.blocking);
+  if(architecture && architecturePurpose(architecture)===null)return <div role="alert">Unsupported or mixed-purpose Architecture. Refresh the documents.</div>;
+  // Schema2 selects the baseline purpose; it never enters implementation actions.
+  if (architecture?.schemaVersion === 2) {
+    if(!mainRevision || mainRevision.kind !== "MAIN" || !archRevision) return <div role="alert">A current Main and Architecture are required for baseline validation.</div>;
+    if (!Array.isArray(architecture.validationProfiles)) return <div role="alert">Invalid baseline Architecture. Refresh the documents.</div>;
+    return <BaselineValidationPanel key={projectId+':'+mainRevision.contentHash+':'+archRevision.contentHash} projectId={projectId} mainRevision={mainRevision} architectureRevision={archRevision as WorkspaceRevision<ValidationArchitectureDocument>} onRefresh={load}/>;
+  }
   const save = (
     kind: "MAIN" | "ARCHITECTURE",
     content: MainDocument | ArchitectureDocument,
@@ -491,7 +502,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
       ),
     });
   };
-  const run = view.runs.find((r) => r.id === activeRun);
+  const run = view.runs.filter(isImplementationRun).find((r) => r.id === activeRun);
   const activeRunRunnable =
     !!run &&
     run.approvalId === view.head.approvalId &&
@@ -1232,7 +1243,7 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
       )}
       <section className="space-y-3 border rounded-lg p-4">
         <h3 className="font-semibold">Review and delivery evidence</h3>
-        {view.runs.map((r) => (
+        {view.runs.filter(isImplementationRun).map((r) => (
           <div key={r.id} className="border rounded p-3 space-y-2">
             <Button
               size="sm"
