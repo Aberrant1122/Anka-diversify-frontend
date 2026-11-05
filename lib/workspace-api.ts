@@ -53,7 +53,7 @@ export interface Unit {
     expected: string;
   }[];
 }
-export interface ArchitectureDocument {
+export interface ImplementationArchitectureDocument {
   schemaVersion: 1;
   sourceMain: { id: string; hash: string };
   overview: string;
@@ -66,6 +66,13 @@ export interface ArchitectureDocument {
   units: Unit[];
   questions: Question[];
 }
+
+export interface ValidationArchitectureDocument extends Omit<ImplementationArchitectureDocument,'schemaVersion'> {
+  schemaVersion:2;
+  validationProfiles:import('./baseline-validation').ValidationProfile[];
+}
+export type ArchitectureDocument = ImplementationArchitectureDocument | ValidationArchitectureDocument;
+export function isImplementationRun(run:WorkspaceRun){return run.purpose===undefined||run.purpose==='IMPLEMENTATION';}
 
 export interface WorkspaceRevision<T = MainDocument | ArchitectureDocument> {
   id: string;
@@ -82,6 +89,7 @@ export interface WorkspaceEvent<T = Record<string, unknown>> {
   payload: T;
 }
 export interface WorkspaceRun {
+  purpose?:"IMPLEMENTATION"|"BASELINE_VALIDATION";
   id: string;
   approvalId: string;
   authority: { unitIds: string[]; units?: Unit[] };
@@ -204,10 +212,10 @@ export interface PublicationBundle {
   }[];
 }
 export function commandValidationRequired(run: WorkspaceRun): boolean {
-  return !!run.authority.units?.some((u) => u.commands?.length);
+  return isImplementationRun(run) && !!run.authority.units?.some((u) => u.commands?.length);
 }
 export function commandValidationPassed(run: WorkspaceRun): boolean {
-  return run.events.some(
+  return isImplementationRun(run) && run.events.some(
     (e) =>
       e.kind === "SANDBOX_VALIDATED" &&
       (e.payload as unknown as IsolatedValidationEvidence).result?.passed ===
@@ -221,4 +229,12 @@ export function commandValidationFailed(run: WorkspaceRun): boolean {
       (e.payload as unknown as IsolatedValidationEvidence).result?.passed ===
         false,
   );
+}
+
+export function architecturePurpose(raw:unknown):'IMPLEMENTATION'|'BASELINE_VALIDATION'|null {
+  if(!raw||typeof raw!=='object')return null;
+  const value=raw as {schemaVersion?:unknown;validationProfiles?:unknown};
+  if(value.schemaVersion===1 && !Object.prototype.hasOwnProperty.call(value,'validationProfiles'))return 'IMPLEMENTATION';
+  if(value.schemaVersion===2 && Array.isArray(value.validationProfiles))return 'BASELINE_VALIDATION';
+  return null;
 }
