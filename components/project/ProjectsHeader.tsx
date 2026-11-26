@@ -64,7 +64,7 @@ export function ProjectsHeader({
   const [isNewProjectOpen, setIsNewProjectOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
-  const [startingPhase, setStartingPhase] = useState("product-modeling");
+  const [startingPhase, setStartingPhase] = useState("development");
   const [githubUrl, setGithubUrl] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [showToken, setShowToken] = useState(false);
@@ -84,12 +84,12 @@ export function ProjectsHeader({
     }
 
     setTokenValidation({ status: 'validating', message: 'Validating token...' });
-    
+
     try {
       const result = await projectApi.validateGitHubToken(token);
-      
+
       console.log('Validation result:', result); // Debug log
-      
+
       if (result.valid) {
         setTokenValidation({
           status: 'valid',
@@ -102,11 +102,11 @@ export function ProjectsHeader({
           message: result.error || 'Invalid token',
         });
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Token validation error:', error);
       setTokenValidation({
         status: 'invalid',
-        message: error.message || 'Failed to validate token. Check backend console for details.',
+        message: error instanceof Error ? error.message : 'Failed to validate token. Check backend console for details.',
       });
     }
   };
@@ -123,12 +123,12 @@ export function ProjectsHeader({
   };
 
   const handleAddProject = async () => {
-    if (!projectName || !githubUrl || !githubToken) {
+    if (!projectName || (githubUrl && !githubToken)) {
       console.error("Project name, GitHub URL, and GitHub token are required");
       return;
     }
 
-    if (tokenValidation.status !== 'valid') {
+    if (githubToken && tokenValidation.status !== 'valid') {
       console.error("Please provide a valid GitHub token");
       return;
     }
@@ -148,7 +148,7 @@ export function ProjectsHeader({
       // Reset form
       setProjectName("");
       setProjectDescription("");
-      setStartingPhase("product-modeling");
+      setStartingPhase("development");
       setGithubUrl("");
       setGithubToken("");
       setShowToken(false);
@@ -230,7 +230,7 @@ export function ProjectsHeader({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="product-modeling">
-                        Product Modeling
+                        Legacy planning
                       </SelectItem>
                       <SelectItem value="development">Development</SelectItem>
                       <SelectItem value="marketing">Marketing</SelectItem>
@@ -258,7 +258,7 @@ export function ProjectsHeader({
 
               <div className="flex flex-col gap-2">
                 <label htmlFor="githubUrl" className="text-sm font-medium">
-                  GitHub Repository URL <span className="text-destructive">*</span>
+                  GitHub Repository URL (optional while planning)
                 </label>
                 <Input
                   id="githubUrl"
@@ -315,10 +315,10 @@ export function ProjectsHeader({
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  Required for AI agent to push changes. 
-                  <a 
-                    href="https://github.com/settings/tokens/new?scopes=repo" 
-                    target="_blank" 
+                  Required when connecting a private repository. Publication needs separate approval.
+                  <a
+                    href="https://github.com/settings/tokens/new?scopes=repo"
+                    target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary hover:underline ml-1"
                   >
@@ -327,27 +327,11 @@ export function ProjectsHeader({
                 </p>
               </div>
 
-              <div className="flex flex-col gap-2">
-                <label htmlFor="teamLead" className="text-sm font-medium">
-                  Team Lead (Optional)
-                </label>
-                <Select value={teamLead} onValueChange={setTeamLead}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select team lead" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="john-doe">John Doe</SelectItem>
-                    <SelectItem value="jane-smith">Jane Smith</SelectItem>
-                    <SelectItem value="mike-johnson">Mike Johnson</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
               <div className="flex gap-2 pt-4">
-                <Button 
-                  onClick={handleAddProject} 
+                <Button
+                  onClick={handleAddProject}
                   className="flex-1 gap-2"
-                  disabled={isSubmitting || !projectName || !githubUrl || !githubToken || tokenValidation.status !== 'valid'}
+                  disabled={isSubmitting || !projectName || (!!githubUrl && (!githubToken || tokenValidation.status !== 'valid'))}
                 >
                   {isSubmitting ? (
                     <>
@@ -364,7 +348,7 @@ export function ProjectsHeader({
                     setIsNewProjectOpen(false);
                     setProjectName("");
                     setProjectDescription("");
-                    setStartingPhase("product-modeling");
+                    setStartingPhase("development");
                     setGithubUrl("");
                     setGithubToken("");
                     setShowToken(false);
@@ -416,7 +400,7 @@ export function ProjectsHeader({
             <DropdownMenuItem
               onClick={() => setPhaseFilter("product-modeling")}
             >
-              Product Modeling
+              Legacy planning
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => setPhaseFilter("development")}>
               Development

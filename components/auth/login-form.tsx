@@ -58,11 +58,11 @@ export default function LoginForm() {
 
         // Redirect based on user role
         if (data.user.role === "admin") {
-          router.push("/admin");
+          router.push("/development/projects");
         } else {
           // For non-admin users, you might want a different dashboard
           // For now, redirect to admin (they'll get access denied if not admin)
-          router.push("/admin");
+          router.push("/development/projects");
         }
       } else {
         setError(data.message || "Login failed");

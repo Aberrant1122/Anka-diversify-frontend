@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { projectApi } from "@/lib/project-api";
 import type { Project } from "@/lib/types";
@@ -13,23 +13,20 @@ import {
   FileText,
   FolderOpen,
   Folder,
-  Save,
   RefreshCw,
   X,
-  ExternalLink,
-  Check,
   AlertCircle,
   Github,
   Loader2,
-  Terminal,
   Globe,
-  GitCommit,
 } from "lucide-react";
-import { TerminalPanel } from "./terminal-panel";
 import { BrowserPanel } from "./browser-panel";
 import { useTheme } from "@/components/theme-provider";
 
-const Editor = dynamic(() => import("@monaco-editor/react"), {
+const Editor = dynamic(async () => {
+  const [editor] = await Promise.all([import("@monaco-editor/react"), import("@/lib/secure-monaco")]);
+  return editor.default;
+}, {
   ssr: false,
   loading: () => <EditorSkeleton />,
 });
@@ -155,7 +152,7 @@ interface ProjectIDEProps {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function ProjectIDE({ project, pendingChanges, onChangesApplied }: ProjectIDEProps) {
+export function ProjectIDE({ project }: ProjectIDEProps) {
   const { resolvedTheme } = useTheme();
   const [snapshot, setSnapshot] = useState<{ repoName: string; fileTree: string[]; lastSyncedAt: string } | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -167,17 +164,8 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
 
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveResult, setSaveResult] = useState<{ sha: string; url: string } | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [commitMessage, setCommitMessage] = useState("");
-
-  const [bottomHeight, setBottomHeight] = useState(220);
-  const [showBottom, setShowBottom] = useState(true);
   const [showBrowser, setShowBrowser] = useState(false);
-  const [agentBanner, setAgentBanner] = useState<string | null>(null);
 
-  const dragRef = useRef<{ startY: number; startH: number } | null>(null);
 
   // Load snapshot
   useEffect(() => {
@@ -185,33 +173,6 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
       if (snap) { setSnapshot(snap); setTreeNodes(buildTree(snap.fileTree)); }
     });
   }, [project.id]);
-
-  // Apply pending agent changes to editor
-  useEffect(() => {
-    if (!pendingChanges?.length) return;
-
-    setAgentBanner(`Agent applied ${pendingChanges.length} file${pendingChanges.length !== 1 ? "s" : ""}. Review & save.`);
-    setTimeout(() => setAgentBanner(null), 6000);
-
-    setOpenFiles((prev) => {
-      let next = [...prev];
-      for (const change of pendingChanges) {
-        const existing = next.find((f) => f.path === change.path);
-        if (existing) {
-          // Update existing open file — mark as modified
-          next = next.map((f) => f.path === change.path ? { ...f, content: change.content } : f);
-        } else {
-          // Open as new file with agent's content
-          next = [...next, { path: change.path, content: change.content, savedContent: "", loading: false, error: null }];
-        }
-      }
-      return next;
-    });
-
-    // Switch active tab to first changed file
-    setActiveTab(pendingChanges[0].path);
-    onChangesApplied?.();
-  }, [pendingChanges]);
 
   const handleSync = async () => {
     if (!githubUrl.trim()) return;
@@ -226,7 +187,7 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
   };
 
   const handleToggleDir = (path: string) => {
-    setOpenDirs((prev) => { const n = new Set(prev); n.has(path) ? n.delete(path) : n.add(path); return n; });
+    setOpenDirs((prev) => { const n = new Set(prev); if (n.has(path)) n.delete(path); else n.add(path); return n; });
   };
 
   const handleSelectFile = async (path: string) => {
@@ -249,51 +210,8 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
     });
   };
 
-  const handleEditorChange = (value: string | undefined) => {
-    if (value === undefined || !activeTab) return;
-    setOpenFiles((prev) => prev.map((f) => f.path === activeTab ? { ...f, content: value } : f));
-    setSaveResult(null); setSaveError(null);
-  };
-
-  const handleSave = useCallback(async () => {
-    const file = openFiles.find((f) => f.path === activeTab);
-    if (!file || file.content === file.savedContent) return;
-    setIsSaving(true); setSaveResult(null); setSaveError(null);
-    const msg = commitMessage.trim() || `edit: update ${file.path}`;
-    try {
-      const result = await projectApi.saveRepoFile(project.id, file.path, file.content, msg);
-      setSaveResult(result);
-      setCommitMessage("");
-      setOpenFiles((prev) => prev.map((f) => f.path === activeTab ? { ...f, savedContent: f.content } : f));
-    } catch (err) { setSaveError(err instanceof Error ? err.message : "Save failed"); }
-    finally { setIsSaving(false); }
-  }, [openFiles, activeTab, commitMessage, project.id]);
-
-  // ⌘S / Ctrl+S
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); handleSave(); }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [handleSave]);
-
-  // Drag-to-resize bottom panel
-  const onDragStart = (e: React.MouseEvent) => {
-    dragRef.current = { startY: e.clientY, startH: bottomHeight };
-    const onMove = (ev: MouseEvent) => {
-      if (!dragRef.current) return;
-      const delta = dragRef.current.startY - ev.clientY;
-      setBottomHeight(Math.max(120, Math.min(500, dragRef.current.startH + delta)));
-    };
-    const onUp = () => { dragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
   const activeFile = openFiles.find((f) => f.path === activeTab) ?? null;
   const modifiedPaths = new Set(openFiles.filter((f) => f.content !== f.savedContent).map((f) => f.path));
-  const isModified = activeFile ? activeFile.content !== activeFile.savedContent : false;
 
   // No repo connected
   if (!snapshot) {
@@ -302,7 +220,7 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
         <Github className="h-10 w-10 text-muted-foreground" />
         <div>
           <p className="font-medium">No repository connected</p>
-          <p className="text-sm text-muted-foreground mt-1">Connect a GitHub repo to browse and edit files</p>
+          <p className="text-sm text-muted-foreground mt-1">Connect a GitHub repo to browse files</p>
         </div>
         <div className="flex gap-2 w-full max-w-sm">
           <Input value={githubUrl} onChange={(e) => setGithubUrl(e.target.value)} placeholder="https://github.com/owner/repo" className="h-8 text-sm" />
@@ -336,16 +254,8 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
         </div>
       </div>
 
-      {/* Editor + terminal */}
+      {/* Read-only repository viewer */}
       <div className="flex-1 flex flex-col overflow-hidden bg-background min-w-0">
-        {/* Agent banner */}
-        {agentBanner && (
-          <div className="flex items-center justify-between gap-2 px-4 py-2 bg-violet-600/20 border-b border-violet-500/30 shrink-0">
-            <span className="text-xs text-violet-300">{agentBanner}</span>
-            <button onClick={() => setAgentBanner(null)} className="text-violet-400 hover:text-violet-200"><X className="h-3.5 w-3.5" /></button>
-          </div>
-        )}
-
         {/* File tabs */}
         {openFiles.length > 0 && (
           <div className="flex items-center border-b border-border overflow-x-auto shrink-0 bg-muted">
@@ -367,30 +277,7 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
           </div>
         )}
 
-        {/* Save bar */}
-        {activeFile && (
-          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-muted shrink-0">
-            <span className="text-xs text-muted-foreground font-mono flex-1 truncate">{activeFile.path}</span>
-            {isModified && (
-              <>
-                <GitCommit className="h-3 w-3 text-muted-foreground shrink-0" />
-                <Input value={commitMessage} onChange={(e) => setCommitMessage(e.target.value)}
-                  placeholder="Commit message..." className="h-6 text-xs w-60"
-                  onKeyDown={(e) => e.key === "Enter" && handleSave()} />
-                <Button size="sm" className="h-6 text-xs px-2" onClick={handleSave} disabled={isSaving}>
-                  {isSaving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <><Save className="h-3 w-3 mr-1" />Save & Push</>}
-                </Button>
-              </>
-            )}
-            {saveResult && (
-              <a href={saveResult.url} target="_blank" rel="noreferrer"
-                className="flex items-center gap-1 text-xs text-green-400 hover:text-green-300 shrink-0">
-                <Check className="h-3 w-3" />{saveResult.sha.slice(0, 7)}<ExternalLink className="h-3 w-3" />
-              </a>
-            )}
-            {saveError && <span className="flex items-center gap-1 text-xs text-destructive shrink-0"><AlertCircle className="h-3 w-3" />{saveError}</span>}
-          </div>
-        )}
+        {activeFile && <div className="px-3 py-2 border-b text-xs text-muted-foreground">{activeFile.path} · Read-only repository view. Propose changes in Workflow.</div>}
 
         {/* Monaco editor */}
         <div className="flex-1 min-h-0 overflow-hidden">
@@ -405,9 +292,9 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
                 height="100%"
                 language={langFromPath(activeFile.path)}
                 value={activeFile.content}
-                onChange={handleEditorChange}
                 theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
                 options={{
+                  readOnly:true,
                   fontSize: 13, lineHeight: 20,
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
@@ -422,41 +309,13 @@ export function ProjectIDE({ project, pendingChanges, onChangesApplied }: Projec
           ) : (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
               <FileText className="h-10 w-10 opacity-20" />
-              <p className="text-sm">Select a file to edit</p>
-              <p className="text-xs opacity-50">⌘S / Ctrl+S to save & push</p>
+              <p className="text-sm">Select a file to inspect</p>
+              <p className="text-xs opacity-50">Propose implementation changes in Workflow</p>
             </div>
           )}
         </div>
 
-        {/* Drag handle */}
-        {showBottom && (
-          <div onMouseDown={onDragStart}
-            className="h-1 bg-border hover:bg-primary/50 cursor-row-resize shrink-0 transition-colors" />
-        )}
-
-        {/* Terminal panel */}
-        <div className="shrink-0 border-t border-border overflow-hidden bg-[#0d1117]"
-          style={{ height: showBottom ? `${bottomHeight}px` : "32px" }}>
-          <div className="flex items-center border-b border-border bg-muted shrink-0 h-8">
-            <span className="flex items-center gap-1.5 px-3 h-full text-xs text-foreground border-r border-border">
-              <Terminal className="h-3.5 w-3.5" />Terminal
-            </span>
-            <button
-              onClick={() => setShowBrowser((v) => !v)}
-              className={cn("flex items-center gap-1.5 px-3 h-full text-xs border-r border-border hover:bg-accent/50",
-                showBrowser ? "text-foreground bg-accent" : "text-muted-foreground")}>
-              <Globe className="h-3.5 w-3.5" />Browser
-            </button>
-            <button onClick={() => setShowBottom((v) => !v)}
-              className="ml-auto px-3 h-full text-xs text-muted-foreground hover:text-foreground">
-              {showBottom ? "▾" : "▴"}
-            </button>
-          </div>
-          {/* Always keep TerminalPanel in DOM so history is preserved */}
-          <div style={{ height: showBottom ? `${bottomHeight - 32}px` : "0px", overflow: "hidden" }}>
-            <TerminalPanel projectId={project.id} />
-          </div>
-        </div>
+        <div className="shrink-0 border-t px-3 py-2 flex items-center justify-between text-xs text-muted-foreground"><span>Implementation and validation evidence is available in Workflow.</span><Button size="sm" variant="ghost" onClick={()=>setShowBrowser(v=>!v)}><Globe className="h-3 w-3 mr-1"/>Browser</Button></div>
       </div>
 
       {/* Browser panel — separate right panel */}

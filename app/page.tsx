@@ -13,7 +13,7 @@ export default function HomePage() {
   useEffect(() => {
     // Only redirect if not loading and user is authenticated
     if (!isLoading && isAuthenticated) {
-      router.push("/admin");
+      router.push("/development/projects");
     }
   }, [isAuthenticated, isLoading, router]);
 
