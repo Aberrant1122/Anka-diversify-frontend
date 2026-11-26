@@ -66,6 +66,9 @@ function NativeAssignmentCard({record,projectId,version,disabled,refresh}:{recor
 }
 export function NativeAssignmentPanel({projectId,view,architecture,packet,disabled,onRefresh}:{projectId:string;view:WorkspaceView;architecture:ArchitectureDocument|null;packet:DraftHandoffPreview|null;disabled:boolean;onRefresh:()=>Promise<void>}) {
   const [records,setRecords]=useState<NativeRecord[]>([]),[session,setSession]=useState(""),[note,setNote]=useState(""),[ack,setAck]=useState(false),[selectedFiles,setSelectedFiles]=useState<string[]>([]),[busy,setBusy]=useState(false),[message,setMessage]=useState("");
+  const scopeKey=JSON.stringify([packet?.packetHash,packet?.documents,packet?.verificationExpectations.map(c=>c.criterionId)]);
+  const [confirmedScope,setConfirmedScope]=useState(scopeKey);
+  if(confirmedScope!==scopeKey){setConfirmedScope(scopeKey);setAck(false);setSelectedFiles([]);}
   const attempt=useRef<{key:string;body:string}|null>(null);
   const identity=useRef(projectId);
   useEffect(()=>{identity.current=projectId;let cancelled=false;workspaceRequest<NativeRecord[]>(projectId,"/native-assignments").then(data=>{if(!cancelled)setRecords(data);}).catch(e=>{if(!cancelled)setMessage(e instanceof Error?e.message:"Native history unavailable");});return()=>{cancelled=true;identity.current="";};},[projectId,view.head.stateVersion]);
@@ -88,9 +91,9 @@ export function NativeAssignmentPanel({projectId,view,architecture,packet,disabl
     {!packet&&<p>Generate a current draft preview to choose new work.</p>}
     {packet&&<div className="space-y-2">
       <p>Selected criteria: {packet.verificationExpectations.map(c=>c.criterionId).join(", ")} · {packet.repositoryBinding.status}</p>
-      {files.map(f=><label className="block" key={fileKey(f)}><input type="checkbox" aria-label={"Authorize file "+f.path+" in "+f.repositoryId} checked={selectedFiles.includes(fileKey(f))} onChange={e=>setSelectedFiles(e.target.checked?[...selectedFiles,fileKey(f)]:selectedFiles.filter(k=>k!==fileKey(f)))}/>{f.action} {f.path} · {f.repositoryId}</label>)}
-      <Input aria-label="Native session reference" placeholder="Reference for the session you started" value={session} maxLength={200} onChange={e=>setSession(e.target.value)}/>
-      <Textarea aria-label="Bounded authorization note" placeholder="Describe the exact permitted work and exclusions" value={note} maxLength={2000} onChange={e=>setNote(e.target.value)}/>
+      {files.map(f=><label className="block" key={fileKey(f)}><input type="checkbox" aria-label={"Authorize file "+f.path+" in "+f.repositoryId} checked={selectedFiles.includes(fileKey(f))} onChange={e=>{setSelectedFiles(e.target.checked?[...selectedFiles,fileKey(f)]:selectedFiles.filter(k=>k!==fileKey(f)));setAck(false);}}/>{f.action} {f.path} · {f.repositoryId}</label>)}
+      <Input aria-label="Native session reference" placeholder="Reference for the session you started" value={session} maxLength={200} onChange={e=>{setSession(e.target.value);setAck(false);}}/>
+      <Textarea aria-label="Bounded authorization note" placeholder="Describe the exact permitted work and exclusions" value={note} maxLength={2000} onChange={e=>{setNote(e.target.value);setAck(false);}}/>
       <label className="block"><input type="checkbox" aria-label="Confirm bounded manual authorization" checked={ack} onChange={e=>setAck(e.target.checked)}/>I authorize only the selected criteria, displayed baselines and checked files for this manual session.</label>
       <Button disabled={disabled||busy||!ack||!session.trim()||!note.trim()||!files.some(f=>selectedFiles.includes(fileKey(f)))||packet.repositoryBinding.status!=="BOUND"} onClick={register}>Register bounded manual assignment</Button>
     </div>}

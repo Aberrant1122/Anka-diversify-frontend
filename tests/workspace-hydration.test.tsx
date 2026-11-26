@@ -199,6 +199,10 @@ test('native owner UI requires bounded confirmation, returns honest evidence, an
     await active.click(active.container.querySelector<HTMLInputElement>('[aria-label^="Authorize file "]')!);
     assert.equal(active.button('Register bounded manual assignment').disabled,true);
     await active.click(active.container.querySelector<HTMLInputElement>('[aria-label="Confirm bounded manual authorization"]')!);
+    await active.input('[aria-label="Bounded authorization note"]','Reconfirmed README-only disposable scope');
+    assert.equal(active.container.querySelector<HTMLInputElement>('[aria-label="Confirm bounded manual authorization"]')!.checked,false);
+    assert.equal(active.button('Register bounded manual assignment').disabled,true);
+    await active.click(active.container.querySelector<HTMLInputElement>('[aria-label="Confirm bounded manual authorization"]')!);
     await active.click(active.button('Register bounded manual assignment'));
     assert.ok(finishRegistration);
     await active.changeField('Purpose','Preserve this draft typed while assignment is pending');
