@@ -1,3 +1,22 @@
+export interface DraftHandoffPreview {
+  schemaVersion: 1;
+  purpose: "DRAFT_PREVIEW";
+  executionAuthorized: false;
+  projectId: string;
+  ownerReference: string;
+  stateVersion: number;
+  freshness: "VERSION_BOUND_SNAPSHOT";
+  documents: {
+    main: {id:string;hash:string};
+    architecture: {id:string;hash:string;sourceMain:{id:string;hash:string}};
+  };
+  requirements: {id:string;description:string;acceptanceCriteria:Named[]}[];
+  context: {purpose:string;constraints:string[];exclusions:string[];openQuestions:(Question & {source:"MAIN"|"ARCHITECTURE"})[]};
+  verificationExpectations: {requirementId:string;criterionId:string;description:string;status:"NOT_ASSESSED"}[];
+  nextDecision: string;
+  packetHash: string;
+  repositoryBinding: {status: "BOUND" | "UNBOUND";repositories:{id:string;baseline:string}[];unboundCriterionIds:string[]};
+}
 export interface Named {
   id: string;
   description: string;
@@ -32,6 +51,7 @@ export interface VerificationCommand {
   timeoutMs: number;
 }
 export interface WorkspaceCapabilities {
+  nativeAssignment?: boolean;
   aiGeneration: boolean;
   isolatedValidation?: boolean;
   publication?: boolean;

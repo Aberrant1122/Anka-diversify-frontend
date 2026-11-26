@@ -1,12 +1,14 @@
 "use client";
 import { BaselineValidationPanel } from "./BaselineValidationPanel";
+import { NativeAssignmentPanel } from "./NativeAssignmentPanel";
 import { ExecutionActions } from "./WorkspaceExecutionActions";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   workspaceRequest,
+  DraftHandoffPreview,
   WorkspaceCapabilities,
   commandValidationRequired,
   commandValidationPassed,
@@ -310,6 +312,53 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
       setBusy(false);
     }
   };
+  const [draftCriteria, setDraftCriteria] = useState<string[]>([]);
+  const [draftPacket, setDraftPacket] = useState<{key:string;packet:DraftHandoffPreview}|null>(null);
+  const [draftMessage, setDraftMessage] = useState("");
+  const [draftBusy, setDraftBusy] = useState(false);
+  const draftKey = JSON.stringify([projectId,view?.head,main,architecture,brief,draftCriteria]);
+  const currentDraftKey = useRef(draftKey);
+  const [previousDraftKey, setPreviousDraftKey] = useState(draftKey);
+  if (previousDraftKey !== draftKey) {
+    setPreviousDraftKey(draftKey); setDraftPacket(null); setDraftMessage("");
+  }
+  useLayoutEffect(() => {
+    currentDraftKey.current = draftKey;
+    return () => { currentDraftKey.current = ""; };
+  }, [draftKey]);
+  const nativeProject = useRef(projectId);
+  useLayoutEffect(() => {
+    nativeProject.current = projectId;
+    return () => { nativeProject.current = ""; };
+  }, [projectId]);
+  const refreshNativeAuthority = useCallback(async () => {
+    const [next, capabilities] = await fetchSnapshot();
+    if (nativeProject.current !== projectId) return;
+    // Ledger writes do not edit documents. Preserve any draft typed in flight.
+    setView(next); setCapabilities(capabilities);
+  }, [fetchSnapshot, projectId]);
+  const requestDraft = async (copy = false) => {
+    if (!view || !main || !architecture) return;
+    const m=view.documents.find(d=>d.id===view.head.mainId), a=view.documents.find(d=>d.id===view.head.architectureId);
+    if (!m || !a || JSON.stringify(main)!==JSON.stringify(m.content) || JSON.stringify(architecture)!==JSON.stringify(a.content) || brief!==main.brief || !draftCriteria.length) return;
+    const key=draftKey;
+    setDraftBusy(true); setDraftMessage(""); setDraftPacket(null);
+    try {
+      const packet=await workspaceRequest<DraftHandoffPreview>(projectId,"/handoff-preview",{
+        expectedStateVersion:view.head.stateVersion, mainId:m.id,mainHash:m.contentHash,
+        architectureId:a.id,architectureHash:a.contentHash,
+        requirementIds:main.requirements.filter(r=>r.acceptanceCriteria.some(c=>draftCriteria.includes(c.id))).map(r=>r.id),
+        criterionIds:draftCriteria,
+      });
+      if(currentDraftKey.current!==key)return;
+      setDraftPacket({key,packet});
+      if(copy){
+        await navigator.clipboard.writeText(JSON.stringify(packet,null,2));
+        if(currentDraftKey.current===key)setDraftMessage("Draft copied. Execution remains unauthorized.");
+      }
+    }catch(e){if(currentDraftKey.current===key){setDraftPacket(null);setDraftMessage(e instanceof Error?e.message:"Draft preview failed");}}
+    finally{setDraftBusy(false);}
+  };
   if (!view)
     return <div className="p-5">{error || "Loading project documents…"}</div>;
   const mainRevision = view.documents.find((d) => d.id === view.head.mainId),
@@ -541,6 +590,19 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
           {error}
         </p>
       )}
+      <section aria-label="Draft handoff preview" className="space-y-3 rounded-lg border p-4">
+        <h3 className="font-semibold">Draft handoff preview</h3>
+        <p>Select saved criteria to review a version-bound draft. This does not authorize execution or create a run.</p>
+        {main?.requirements.map(r=> <fieldset key={r.id}><legend>{r.id}: {r.description}</legend>{r.acceptanceCriteria.map(c=><label key={c.id} className="block"><input type="checkbox" aria-label={"Draft criterion "+c.id} checked={draftCriteria.includes(c.id)} onChange={e=>setDraftCriteria(e.target.checked?[...draftCriteria,c.id]:draftCriteria.filter(id=>id!==c.id))}/>{c.id}: {c.description}</label>)}</fieldset>)}
+        <Button disabled={busy || draftBusy || !!dirtyMain || !!dirtyArch || brief!==main?.brief || !draftCriteria.length || !mainRevision || !archRevision} onClick={()=>requestDraft()}>Preview draft handoff</Button>
+        {draftPacket?.key===draftKey && !dirtyMain && !dirtyArch && brief===main?.brief && <div>
+          <p>DRAFT_PREVIEW · Execution authorized: false · Repository: {draftPacket.packet.repositoryBinding.status}</p>
+          <pre aria-label="Draft handoff packet" className="whitespace-pre-wrap break-words">{JSON.stringify(draftPacket.packet,null,2)}</pre>
+          <Button disabled={draftBusy} onClick={()=>requestDraft(true)}>Copy draft handoff</Button>
+        </div>}
+        {draftMessage && <p role="status">{draftMessage}</p>}
+      </section>
+      {capabilities.nativeAssignment && <NativeAssignmentPanel key={projectId} projectId={projectId} view={view} architecture={architecture} packet={draftPacket?.key===draftKey&&!dirtyMain&&!dirtyArch&&brief===main?.brief?draftPacket.packet:null} disabled={busy||!!dirtyMain||!!dirtyArch||brief!==main?.brief} onRefresh={refreshNativeAuthority}/>}
       {capabilities.aiGeneration && !baselineMode && (
         <p className="text-sm text-muted-foreground">
           AI drafts and code proposals require review. Generation never approves
@@ -1238,10 +1300,10 @@ export function WorkspaceWorkflow({ projectId }: { projectId: string }) {
           )}
         </section>
       )}
-      {view.operations?.length > 0 && (
+      {view.operations?.some(op=>!op.kind.startsWith("NATIVE_")) && (
         <section className="space-y-2 border rounded-lg p-4">
           <h3 className="font-semibold">Generation history</h3>
-          {view.operations.map((op) => (
+          {view.operations.filter(op=>!op.kind.startsWith("NATIVE_")).map((op) => (
             <p key={op.id} className="text-sm">
               {op.kind} · {op.status}
               {op.errorCode ? " · " + op.errorCode : ""}

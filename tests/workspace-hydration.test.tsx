@@ -7,9 +7,26 @@ import {JSDOM} from 'jsdom';
 import type {Root} from 'react-dom/client';
 import {hydratedWorkspaceFixture} from './workspace-hydration-fixture';
 
-async function hydrate(blockers=true){
+async function hydrate(blockers=true, preview?: (body:Record<string,unknown>)=>Promise<Response>, native?: (path:string,body:Record<string,unknown>|null)=>Promise<Response>){
   const server=hydratedWorkspaceFixture(blockers),dom=new JSDOM('<div id="root"></div>',{url:'http://synthetic.invalid',pretendToBeVisual:true});
   const descriptors=new Map<string,PropertyDescriptor|undefined>();
+  const originalFetch=server.fetch;
+  if(native){
+    const arch=server.currentArchitecture(), {validationProfiles: _profiles,...base}=arch.content as typeof arch.content & {validationProfiles?:unknown};
+    arch.content={...base,schemaVersion:1,units:[{id:'UNIT-NATIVE',title:'Sample note',requirementIds:['REQ-001'],dependsOn:[],repositoryId:'repo',files:[{path:'README.md',action:'modify'}],checks:[{id:'CHECK-NATIVE',criterionId:'AC-001',type:'contains',path:'README.md',expected:'reviewed'},{id:'CHECK-NATIVE-TWO',criterionId:'AC-002',type:'contains',path:'README.md',expected:'reviewed'}]}]};
+  }
+  if(preview||native)server.fetch=async(input,init)=>{
+    if(native&&String(input).endsWith('/capabilities'))return Response.json({data:{aiGeneration:false,nativeAssignment:true}});
+    if(native&&String(input).includes('/native-assignments')){
+      const path=String(input).slice(String(input).indexOf('/native-assignments')),body=init?.body?JSON.parse(String(init.body)):null;
+      server.calls.push({path,method:init?.method??'GET',body});return native(path,body);
+    }
+    if(String(input).endsWith('/handoff-preview')){
+      const body=JSON.parse(String(init?.body));server.calls.push({path:'/handoff-preview',method:init?.method??'GET',body});
+      return preview!(body);
+    }
+    return originalFetch(input,init);
+  };
   const globals:Record<string,unknown>={window:dom.window,document:dom.window.document,navigator:dom.window.navigator,localStorage:dom.window.localStorage,sessionStorage:dom.window.sessionStorage,HTMLElement:dom.window.HTMLElement,HTMLInputElement:dom.window.HTMLInputElement,HTMLTextAreaElement:dom.window.HTMLTextAreaElement,Element:dom.window.Element,Node:dom.window.Node,MutationObserver:dom.window.MutationObserver,Event:dom.window.Event,MouseEvent:dom.window.MouseEvent,IS_REACT_ACT_ENVIRONMENT:true,fetch:server.fetch};
   for(const [key,value] of Object.entries(globals)){descriptors.set(key,Object.getOwnPropertyDescriptor(globalThis,key));Object.defineProperty(globalThis,key,{value,writable:true,configurable:true});}
   const originalUrl=process.env.NEXT_PUBLIC_API_URL;process.env.NEXT_PUBLIC_API_URL='http://synthetic.invalid/api';dom.window.localStorage.setItem('authToken','synthetic-owner-token');
@@ -104,4 +121,106 @@ test('hydrated CAS conflict preserves the draft and cannot reuse an invalidated 
     assert.equal(h.server.calls.filter(c=>c.path==='/documents').length,1);
     assert.deepEqual(h.forbidden(),[]);assert.deepEqual(h.hydrationErrors,[]);
   }finally{await h.close();}
+});
+
+test('draft preview copy revalidates without writes, dirty edits discard packets, reopen needs fresh preview',async()=>{
+  const bodies:Record<string,unknown>[]=[], copied:string[]=[];
+  let stale=false;
+  const h=await hydrate(false,async body=>{
+    bodies.push(body);
+    return stale?Response.json({error:'HANDOFF_STALE'},{status:409}):Response.json({data:{purpose:'DRAFT_PREVIEW',executionAuthorized:false,packetHash:'sample',repositoryBinding:{status:'UNBOUND'}}});
+  });
+  try{
+    Object.defineProperty(h.dom.window.navigator,'clipboard',{value:{writeText:async(text:string)=>{copied.push(text);}},configurable:true});
+    const checkbox=h.container.querySelector<HTMLInputElement>('[aria-label^="Draft criterion "]')!;
+    assert.ok(checkbox);await h.click(checkbox);
+    const initial=structuredClone(h.server.documents), callStart=h.server.calls.length;
+    await h.click(h.button('Preview draft handoff'));
+    assert.match(h.container.textContent??'',/DRAFT_PREVIEW.*Execution authorized: false.*UNBOUND/);
+    await h.click(h.button('Copy draft handoff'));
+    assert.equal(bodies.length,2);assert.equal(copied.length,1);assert.equal(JSON.parse(copied[0]).executionAuthorized,false);
+    assert.deepEqual(h.server.calls.slice(callStart).map(c=>c.path),['/handoff-preview','/handoff-preview']);
+    assert.deepEqual(h.server.documents,initial);assert.equal(h.server.approvals.length,0);
+    await h.changeField('Purpose','Unsaved sample edit');
+    assert.equal(h.container.querySelector('[aria-label="Draft handoff packet"]'),null);
+    assert.equal(h.button('Preview draft handoff').disabled,true);
+    await h.click(h.button('Discard unsaved document edits'));
+    await h.click(h.button('Preview draft handoff'));
+    stale=true;await h.click(h.button('Copy draft handoff'));
+    assert.match(h.container.textContent??'',/HANDOFF_STALE/);assert.equal(copied.length,1);
+    assert.equal(h.container.querySelector('[aria-label="Draft handoff packet"]'),null);
+    assert.deepEqual(h.forbidden(),[]);
+  }finally{await h.close();}
+  const reopened=await hydrate(false);
+  try{assert.equal(reopened.container.querySelector('[aria-label="Draft handoff packet"]'),null);}finally{await reopened.close();}
+});
+
+test('late draft response cannot restore a preview invalidated by an edit',async()=>{
+  let finish:((response:Response)=>void)|undefined;
+  const h=await hydrate(false,()=>new Promise<Response>(resolve=>{finish=resolve;}));
+  try{
+    await h.click(h.container.querySelector<HTMLInputElement>('[aria-label^="Draft criterion "]')!);
+    await h.click(h.button('Preview draft handoff'));assert.ok(finish);
+    await h.changeField('Architecture overview','Edit while preview is loading');
+    await act(async()=>{finish!(Response.json({data:{purpose:'DRAFT_PREVIEW',executionAuthorized:false,repositoryBinding:{status:'UNBOUND'}}}));});
+    assert.equal(h.container.querySelector('[aria-label="Draft handoff packet"]'),null);
+    assert.deepEqual(h.forbidden(),[]);
+  }finally{await h.close();}
+});
+
+test('native owner UI requires bounded confirmation, returns honest evidence, and recovers persisted scope on reopen',async()=>{
+  let record:any=null, packet:any=null, active:Awaited<ReturnType<typeof hydrate>>;
+  let finishRegistration:(()=>void)|undefined;
+  const preview=async(body:Record<string,unknown>)=>{
+    const m=active.server.currentMain(),a=active.server.currentArchitecture();
+    packet={schemaVersion:1,purpose:'DRAFT_PREVIEW',executionAuthorized:false,projectId:'synthetic',ownerReference:'owner',stateVersion:body.expectedStateVersion,freshness:'VERSION_BOUND_SNAPSHOT',packetHash:'a'.repeat(64),documents:{main:{id:m.id,hash:m.contentHash},architecture:{id:a.id,hash:a.contentHash,sourceMain:{id:m.id,hash:m.contentHash}}},requirements:[{...m.content.requirements[0],acceptanceCriteria:m.content.requirements[0].acceptanceCriteria.filter(c=>(body.criterionIds as string[]).includes(c.id))}],repositoryBinding:{status:'BOUND',repositories:[{id:'repo',baseline:'b'.repeat(40)}],unboundCriterionIds:[]},context:{purpose:'Synthetic',constraints:[],exclusions:[],openQuestions:[]},verificationExpectations:(body.criterionIds as string[]).map(id=>({requirementId:'REQ-001',criterionId:id,description:id,status:'NOT_ASSESSED'})),nextDecision:'Review draft only'};
+    return Response.json({data:packet});
+  };
+  const native=async(path:string,body:Record<string,unknown>|null)=>{
+    if(path==='/native-assignments'&&!body)return Response.json({data:record?[record]:[]});
+    if(path==='/native-assignments'&&body){
+      assert.equal(body.acknowledgeAuthorization,true);assert.deepEqual(body.files,[{repositoryId:'repo',path:'README.md',action:'modify'}]);
+      record={id:'native-1',createdBy:'owner',authorityCurrent:true,accepted:false,context:{packet,files:body.files,authorizedBy:'owner',authorizationNote:body.authorizationNote,sessionReference:body.sessionReference,providerDispatchAuthorized:false},criteria:packet.verificationExpectations.map((c:Record<string,unknown>)=>({...c,status:'MISSING'})),evidence:[],independentVerification:'NOT_PERFORMED',nextDecision:'Return missing criterion evidence; no success is inferred.',recoveryObservations:[]};active.server.advanceVersion();return new Promise<Response>(resolve=>{finishRegistration=()=>resolve(Response.json({data:record}));});
+    }
+    if(path.endsWith('/evidence')&&body){const receipt=body.receipt as Record<string,unknown>;record.evidence.push({id:'evidence-1',evidenceClass:'OWNER_REPORTED_NOT_INDEPENDENTLY_VERIFIED',receipt});record.criteria[0].status=receipt.status;active.server.advanceVersion();return Response.json({data:record});}
+    if(path.endsWith('/recovery'))return Response.json({data:record});
+    if(path.endsWith('/recovery-observations')&&body){record.recoveryObservations.push({id:'recovery-1',sessionReference:body.sessionReference,repeatedContextCount:body.repeatedContextCount,measurementClass:'OWNER_REPORTED'});active.server.advanceVersion();return Response.json({data:record});}
+    throw Error('Unexpected native request '+path);
+  };
+  active=await hydrate(false,preview,native);
+  const copied:string[]=[];
+  try{
+    await active.click(active.container.querySelector<HTMLInputElement>('[aria-label="Draft criterion AC-001"]')!);
+    await active.click(active.container.querySelector<HTMLInputElement>('[aria-label="Draft criterion AC-002"]')!);
+    await active.click(active.button('Preview draft handoff'));
+    assert.equal(active.button('Register bounded manual assignment').disabled,true);
+    await active.input('[aria-label="Native session reference"]','Current synthetic session');
+    await active.input('[aria-label="Bounded authorization note"]','README-only disposable scope');
+    await active.click(active.container.querySelector<HTMLInputElement>('[aria-label^="Authorize file "]')!);
+    assert.equal(active.button('Register bounded manual assignment').disabled,true);
+    await active.click(active.container.querySelector<HTMLInputElement>('[aria-label="Confirm bounded manual authorization"]')!);
+    await active.click(active.button('Register bounded manual assignment'));
+    assert.ok(finishRegistration);
+    await active.changeField('Purpose','Preserve this draft typed while assignment is pending');
+    await act(async()=>{finishRegistration!();});
+    assert.equal(active.textField('Purpose').value,'Preserve this draft typed while assignment is pending');
+    await active.click(active.button('Discard unsaved document edits'));
+    assert.match(active.container.textContent??'',/AC-001: MISSING/);assert.match(active.container.textContent??'',/AC-002: MISSING/);
+    const receipt={criterionId:'AC-001',repositoryId:'repo',baseline:'b'.repeat(40),commit:'c'.repeat(40),testedCommit:'c'.repeat(40),status:'PASSED',check:{command:['node','--test','note.cjs'],exitCode:0,stdout:'Sample passed',stderr:''},evidenceLabel:'DISPOSABLE_SAMPLE'};
+    await active.input('[aria-label="Criterion receipt for native-1"]',JSON.stringify(receipt));
+    await active.click(active.button('Save owner-reported receipt'));
+    assert.match(active.container.textContent??'',/AC-001: PASSED/);assert.match(active.container.textContent??'',/AC-002: MISSING/);
+    assert.match(active.container.textContent??'',/Independent verification: NOT_PERFORMED/);
+    Object.defineProperty(active.dom.window.navigator,'clipboard',{value:{writeText:async(text:string)=>{copied.push(text);}},configurable:true});
+    await active.click(active.button('Copy recovery packet'));assert.equal(JSON.parse(copied[0]).accepted,false);assert.equal(JSON.parse(copied[0]).criteria[1].status,'MISSING');
+    assert.deepEqual(active.forbidden(),[]);assert.deepEqual(active.hydrationErrors,[]);
+  }finally{await active.close();}
+  active=await hydrate(false,preview,native);
+  try{
+    assert.equal(active.container.querySelector('[aria-label="Draft handoff packet"]'),null);
+    assert.match(active.container.textContent??'',/Current synthetic session/);assert.match(active.container.textContent??'',/AC-002: MISSING/);assert.equal(record.recoveryObservations.length,0);
+    await active.input('[aria-label="Recovery session for native-1"]','Fresh synthetic session');await active.input('[aria-label="Repeated context count for native-1"]','0');
+    const label=[...active.container.querySelectorAll('label')].find(l=>l.textContent?.includes('my observation of an actual recovery'));assert.ok(label);await active.click(label.querySelector('input')!);
+    await active.click(active.button('Save recovery observation'));assert.equal(record.recoveryObservations[0].repeatedContextCount,0);assert.equal(record.recoveryObservations[0].measurementClass,'OWNER_REPORTED');assert.deepEqual(active.forbidden(),[]);
+  }finally{await active.close();}
 });
